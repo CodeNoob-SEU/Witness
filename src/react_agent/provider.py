@@ -63,20 +63,52 @@ class ProviderCapabilities:
 def _usage_from_responses(raw: Any) -> Usage:
     if raw is None:
         return Usage()
+    input_details = getattr(raw, "input_tokens_details", None)
+    output_details = getattr(raw, "output_tokens_details", None)
+    input_tokens = int(getattr(raw, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(raw, "output_tokens", 0) or 0)
+    total_tokens = int(getattr(raw, "total_tokens", 0) or 0)
     return Usage(
-        input_tokens=int(getattr(raw, "input_tokens", 0) or 0),
-        output_tokens=int(getattr(raw, "output_tokens", 0) or 0),
-        total_tokens=int(getattr(raw, "total_tokens", 0) or 0),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cached_input_tokens=(
+            int(getattr(input_details, "cached_tokens", 0) or 0)
+            if input_details is not None
+            else None
+        ),
+        reasoning_output_tokens=(
+            int(getattr(output_details, "reasoning_tokens", 0) or 0)
+            if output_details is not None
+            else None
+        ),
+        billable_tokens=total_tokens,
     )
 
 
 def _usage_from_chat(raw: Any) -> Usage:
     if raw is None:
         return Usage()
+    input_details = getattr(raw, "prompt_tokens_details", None)
+    output_details = getattr(raw, "completion_tokens_details", None)
+    input_tokens = int(getattr(raw, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(raw, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(raw, "total_tokens", 0) or 0)
     return Usage(
-        input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
-        output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
-        total_tokens=int(getattr(raw, "total_tokens", 0) or 0),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cached_input_tokens=(
+            int(getattr(input_details, "cached_tokens", 0) or 0)
+            if input_details is not None
+            else None
+        ),
+        reasoning_output_tokens=(
+            int(getattr(output_details, "reasoning_tokens", 0) or 0)
+            if output_details is not None
+            else None
+        ),
+        billable_tokens=total_tokens,
     )
 
 
@@ -165,6 +197,9 @@ def _parse_responses_response(response: Any) -> ModelResponse:
         ),
         usage=_usage_from_responses(getattr(response, "usage", None)),
         request_id=getattr(response, "_request_id", None),
+        response_model=(
+            str(getattr(response, "model", "") or "") or None
+        ),
         finish_reason=str(finish_reason) if finish_reason is not None else None,
         outcome=outcome,
         diagnostic=diagnostic,
@@ -202,6 +237,7 @@ def _parse_chat_response(response: Any) -> ModelResponse:
         message=AssistantMessage(content=raw_message.content or refusal, tool_calls=calls),
         usage=_usage_from_chat(response.usage),
         request_id=getattr(response, "_request_id", None),
+        response_model=(str(getattr(response, "model", "") or "") or None),
         finish_reason=finish_reason,
         outcome=outcome,
         diagnostic=diagnostic,

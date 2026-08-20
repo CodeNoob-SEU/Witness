@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from .errors import ConfigurationError, ModelInvocationError
 from .models import (
     AgentEvent,
+    AgentJournalEvent,
+    AgentJournalEventKind,
     AgentResult,
+    AgentResumeState,
     AgentStreamEvent,
     AgentStreamEventKind,
     EventKind,
@@ -32,6 +37,10 @@ from .models import (
     TranscriptItem,
     Usage,
     UserMessage,
+    agent_event_to_json,
+    tool_action_fingerprint,
+    transcript_item_to_json,
+    transcript_to_json,
 )
 from .prompts import DEFAULT_INSTRUCTIONS
 from .provider import Model, StreamingModel
@@ -39,6 +48,19 @@ from .tools import ApprovalHandler, DebugExposure, Tool, ToolRegistry
 
 EventSink = Callable[[AgentEvent], Awaitable[None] | None]
 StreamSink = Callable[[AgentStreamEvent], Awaitable[None] | None]
+JournalSink = Callable[[AgentJournalEvent], Awaitable[None] | None]
+SideEffectGuard = Callable[[], Awaitable[None] | None]
+
+
+def _usage_data(usage: Usage) -> dict[str, JsonValue]:
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+        "billable_tokens": usage.billable_tokens,
+    }
 
 
 _STREAM_KIND_BY_EVENT_KIND: dict[EventKind, AgentStreamEventKind] = {
@@ -85,15 +107,6 @@ class AgentConfig:
             raise ConfigurationError("repeated_action_limit must be at least 2")
 
 
-def _fingerprint(call: ToolCall) -> str:
-    try:
-        parsed = json.loads(call.arguments)
-        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError):
-        canonical = call.arguments
-    return f"{call.name}\0{canonical}"
-
-
 def _estimate_context_chars(
     transcript: Sequence[TranscriptItem],
     *,
@@ -120,8 +133,7 @@ def _estimate_context_chars(
         else:
             total += len(item.content or "")
             total += sum(
-                len(call.id) + len(call.name) + len(call.arguments)
-                for call in item.tool_calls
+                len(call.id) + len(call.name) + len(call.arguments) for call in item.tool_calls
             )
     return total
 
@@ -138,6 +150,7 @@ class ReActAgent:
         config: AgentConfig | None = None,
         approval_handler: ApprovalHandler | None = None,
         event_sink: EventSink | None = None,
+        journal_sink: JournalSink | None = None,
     ) -> None:
         if not instructions.strip():
             raise ConfigurationError("instructions must not be empty")
@@ -147,6 +160,35 @@ class ReActAgent:
         self.config = config or AgentConfig()
         self.approval_handler = approval_handler
         self.event_sink = event_sink
+        self.journal_sink = journal_sink
+
+    @property
+    def tool_manifest_hash(self) -> str:
+        payload = [
+            {
+                "spec": {
+                    "name": registered.spec.name,
+                    "description": registered.spec.description,
+                    "parameters": registered.spec.parameters,
+                    "strict": registered.spec.strict,
+                },
+                "version": registered.version,
+                "resume_policy": registered.resume_policy.value,
+            }
+            for registered in self.registry.tools
+        ]
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @property
+    def revision(self) -> str:
+        payload = {
+            "instructions": self.instructions,
+            "config": asdict(self.config),
+            "tool_manifest_hash": self.tool_manifest_hash,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     async def run(
         self,
@@ -154,29 +196,98 @@ class ReActAgent:
         *,
         history: Sequence[TranscriptItem] = (),
         run_id: str | None = None,
+        execution_id: str | None = None,
         event_sink: EventSink | None = None,
         stream_sink: StreamSink | None = None,
+        journal_sink: JournalSink | None = None,
+        resume_state: AgentResumeState | None = None,
+        side_effect_guard: SideEffectGuard | None = None,
+        workspace_path: Path | None = None,
     ) -> AgentResult:
         """Run until a final answer or an explicit budget/protocol terminal state."""
 
-        if not prompt.strip():
+        if resume_state is None and not prompt.strip():
             raise ConfigurationError("prompt must not be empty")
 
         current_run_id = run_id or uuid.uuid4().hex
-        transcript: list[TranscriptItem] = [*history, UserMessage(prompt)]
+        current_execution_id = execution_id or uuid.uuid4().hex
+        transcript: list[TranscriptItem] = (
+            [*history, UserMessage(prompt)]
+            if resume_state is None
+            else list(resume_state.transcript)
+        )
         events: list[AgentEvent] = []
         safe_sink = event_sink or self.event_sink
+        durable_sink = journal_sink or self.journal_sink
         started = time.monotonic()
         deadline = started + self.config.max_wall_time_s
-        model_calls = 0
-        tool_calls = 0
-        tool_executions = 0
-        usage = Usage()
+        model_calls = resume_state.model_calls if resume_state is not None else 0
+        tool_calls = resume_state.tool_calls if resume_state is not None else 0
+        tool_executions = resume_state.tool_executions if resume_state is not None else 0
+        usage = resume_state.usage if resume_state is not None else Usage()
         executed: dict[str, tuple[str, ToolMessage]] = {}
-        action_counts: dict[str, int] = {}
+        if resume_state is not None:
+            for recovered in resume_state.completed_tools:
+                if recovered.completed is not None:
+                    executed[recovered.call.id] = (
+                        tool_action_fingerprint(recovered.call),
+                        recovered.completed,
+                    )
+        action_counts: dict[str, int] = (
+            dict(resume_state.action_counts) if resume_state is not None else {}
+        )
+        recovered_attempts = (
+            {item.call_key: item.attempts for item in resume_state.pending_tools}
+            if resume_state is not None
+            else {}
+        )
         terminal_call_keys: set[str] = set()
+        model_first_delta_at: dict[int, float] = {}
         stream_sequence = 0
         stream_lock = asyncio.Lock()
+
+        async def record(
+            kind: AgentJournalEventKind,
+            operation_id: str,
+            *,
+            step: int | None = None,
+            call: ToolCall | None = None,
+            call_key: str | None = None,
+            public_data: dict[str, JsonValue] | None = None,
+            private_data: dict[str, JsonValue] | None = None,
+        ) -> None:
+            """Deliver a durable fact; failures deliberately abort orchestration."""
+
+            if durable_sink is None:
+                return
+            journal_event = AgentJournalEvent(
+                kind=kind,
+                run_id=current_run_id,
+                execution_id=current_execution_id,
+                operation_id=operation_id,
+                timestamp=time.time(),
+                step=step,
+                call_key=call_key,
+                tool_call_id=call.id if call else None,
+                tool_name=call.name if call else None,
+                public_data=MappingProxyType(dict(public_data or {})),
+                private_data=MappingProxyType(dict(private_data or {})),
+            )
+            if inspect.iscoroutinefunction(durable_sink):
+                outcome: Any = durable_sink(journal_event)
+            else:
+                outcome = await asyncio.to_thread(durable_sink, journal_event)
+            if inspect.isawaitable(outcome):
+                await outcome
+
+        async def guard_side_effect() -> None:
+            """Fail closed when the Runtime no longer owns the fencing lease."""
+
+            if side_effect_guard is None:
+                return
+            guard_outcome = side_effect_guard()
+            if inspect.isawaitable(guard_outcome):
+                await guard_outcome
 
         async def emit_stream(
             kind: AgentStreamEventKind,
@@ -222,6 +333,7 @@ class ReActAgent:
         async def emit(
             kind: EventKind,
             *,
+            timestamp: float | None = None,
             step: int | None = None,
             call: ToolCall | None = None,
             call_key: str | None = None,
@@ -231,7 +343,7 @@ class ReActAgent:
             event = AgentEvent(
                 kind=kind,
                 run_id=current_run_id,
-                timestamp=time.time(),
+                timestamp=time.time() if timestamp is None else timestamp,
                 step=step,
                 tool_call_id=call.id if call else None,
                 tool_name=call.name if call else None,
@@ -300,13 +412,12 @@ class ReActAgent:
             try:
                 payload = json.loads(message.content)
                 meta = payload.get("meta") if isinstance(payload, dict) else None
-                envelope_truncated = bool(
-                    isinstance(meta, dict) and meta.get("truncated") is True
-                )
+                envelope_truncated = bool(isinstance(meta, dict) and meta.get("truncated") is True)
             except (json.JSONDecodeError, TypeError):
                 pass
             data: dict[str, JsonValue] = {
                 "status": "error" if message.is_error else "completed",
+                "outcome": "error" if message.is_error else "completed",
                 "exposure": exposure.value,
                 "is_error": message.is_error,
                 "cached": message.cached if cached is None else cached,
@@ -347,8 +458,39 @@ class ReActAgent:
             )
 
         async def finish(final: AgentResult, *, step: int) -> AgentResult:
+            completed_at = time.time()
+            completion_event = AgentEvent(
+                kind=EventKind.RUN_COMPLETED,
+                run_id=current_run_id,
+                timestamp=completed_at,
+                step=step,
+                data=MappingProxyType({"status": final.status.value}),
+            )
+            await record(
+                AgentJournalEventKind.RUN_COMPLETED,
+                "run:completed",
+                step=step,
+                public_data={
+                    "status": final.status.value,
+                    "stop_reason": final.stop_reason.value,
+                    "model_calls": final.model_calls,
+                    "tool_calls": final.tool_calls,
+                    "tool_executions": final.tool_executions,
+                    "usage": _usage_data(final.usage),
+                },
+                private_data={
+                    "output": final.output,
+                    "error": final.error,
+                    "transcript": transcript_to_json(final.transcript),
+                    "agent_events": [
+                        agent_event_to_json(event)
+                        for event in (*final.events, completion_event)
+                    ],
+                },
+            )
             await emit(
                 EventKind.RUN_COMPLETED,
+                timestamp=completed_at,
                 step=step,
                 data={"status": final.status.value},
                 stream_data={
@@ -358,11 +500,7 @@ class ReActAgent:
                     "tool_calls": final.tool_calls,
                     "tool_executions": final.tool_executions,
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                    "usage": {
-                        "input_tokens": final.usage.input_tokens,
-                        "output_tokens": final.usage.output_tokens,
-                        "total_tokens": final.usage.total_tokens,
-                    },
+                    "usage": _usage_data(final.usage),
                 },
             )
             return replace(final, events=tuple(events))
@@ -379,12 +517,32 @@ class ReActAgent:
         async def execute_one(call: ToolCall, step: int, tool_index: int) -> ToolMessage:
             nonlocal tool_executions
             call_key = f"s{step}:t{tool_index}"
-            fingerprint = _fingerprint(call)
+            attempt = recovered_attempts.get(call_key, 0) + 1
+            fingerprint = tool_action_fingerprint(call)
             cached_entry = executed.get(call.id)
             if cached_entry is not None:
                 cached_fingerprint, cached_result = cached_entry
                 if cached_fingerprint == fingerprint:
-                    reused_result = replace(cached_result, cached=True, duration_ms=0.0)
+                    reused_result = replace(
+                        cached_result,
+                        cached=True,
+                        executed=False,
+                        duration_ms=0.0,
+                    )
+                    reused_public = result_debug_data(
+                        call,
+                        reused_result,
+                        cached=True,
+                    )
+                    await record(
+                        AgentJournalEventKind.TOOL_REUSED,
+                        f"tool:{call_key}:reused:{current_execution_id}",
+                        step=step,
+                        call=call,
+                        call_key=call_key,
+                        public_data=reused_public,
+                        private_data={"message": transcript_item_to_json(reused_result)},
+                    )
                     await emit(
                         EventKind.TOOL_REUSED,
                         step=step,
@@ -412,6 +570,16 @@ class ReActAgent:
                     ),
                     is_error=True,
                 )
+                conflict_public = result_debug_data(call, conflict)
+                await record(
+                    AgentJournalEventKind.TOOL_COMPLETED,
+                    f"tool:{call_key}:completed",
+                    step=step,
+                    call=call,
+                    call_key=call_key,
+                    public_data=conflict_public,
+                    private_data={"message": transcript_item_to_json(conflict)},
+                )
                 await emit(
                     EventKind.TOOL_COMPLETED,
                     step=step,
@@ -428,6 +596,25 @@ class ReActAgent:
                 terminal_call_keys.add(call_key)
                 return conflict
 
+            await record(
+                AgentJournalEventKind.TOOL_STARTED,
+                f"tool:{call_key}:started:{current_execution_id}",
+                step=step,
+                call=call,
+                call_key=call_key,
+                public_data={
+                    "resume_policy": (
+                        registered.resume_policy.value
+                        if (registered := self.registry.get(call.name)) is not None
+                        else "require_operator"
+                    ),
+                    "argument_chars": len(call.arguments),
+                    "attempt": attempt,
+                },
+                private_data={
+                    "call": {"id": call.id, "name": call.name, "arguments": call.arguments}
+                },
+            )
             await emit(
                 EventKind.TOOL_STARTED,
                 step=step,
@@ -444,10 +631,24 @@ class ReActAgent:
                 run_id=current_run_id,
                 approval_handler=self.approval_handler,
                 max_output_chars=self.config.max_tool_output_chars,
+                call_key=call_key,
+                attempt=attempt,
+                before_invoke=guard_side_effect,
+                workspace_path=workspace_path,
             )
             if tool_result.executed:
                 tool_executions += 1
             executed[call.id] = (fingerprint, tool_result)
+            completed_public = result_debug_data(call, tool_result)
+            await record(
+                AgentJournalEventKind.TOOL_COMPLETED,
+                f"tool:{call_key}:completed",
+                step=step,
+                call=call,
+                call_key=call_key,
+                public_data=completed_public,
+                private_data={"message": transcript_item_to_json(tool_result)},
+            )
             await emit(
                 EventKind.TOOL_COMPLETED,
                 step=step,
@@ -482,9 +683,7 @@ class ReActAgent:
                         *(limited(call, tool_index) for tool_index, call in enumerate(calls))
                     )
                 )
-            return [
-                await limited(call, tool_index) for tool_index, call in enumerate(calls)
-            ]
+            return [await limited(call, tool_index) for tool_index, call in enumerate(calls)]
 
         def model_stream_forwarder(
             current_step: int,
@@ -495,6 +694,8 @@ class ReActAgent:
             exposed_argument_chars: dict[int, int] = {}
 
             async def forward(event: ModelStreamEvent) -> None:
+                if event.delta and current_step not in model_first_delta_at:
+                    model_first_delta_at[current_step] = time.monotonic()
                 if event.kind is ModelStreamEventKind.TEXT_DELTA:
                     await emit_stream(
                         AgentStreamEventKind.MODEL_TEXT_DELTA,
@@ -552,11 +753,39 @@ class ReActAgent:
 
             return forward
 
+        if resume_state is None:
+            await record(
+                AgentJournalEventKind.RUN_STARTED,
+                "run:started",
+                public_data={
+                    "history_items": len(history),
+                    "agent_revision": self.revision,
+                    "tool_manifest_hash": self.tool_manifest_hash,
+                },
+                private_data={
+                    "prompt": prompt,
+                    "history": transcript_to_json(history),
+                    "transcript": transcript_to_json(transcript),
+                },
+            )
+        else:
+            await record(
+                AgentJournalEventKind.RUN_RESUMED,
+                f"run:resumed:{current_execution_id}",
+                step=resume_state.next_step,
+                public_data={
+                    "model_calls": model_calls,
+                    "tool_calls": tool_calls,
+                    "tool_executions": tool_executions,
+                },
+                private_data={"transcript": transcript_to_json(transcript)},
+            )
         await emit(
             EventKind.RUN_STARTED,
-            data={"history_items": len(history)},
+            data={"history_items": len(history), "resumed": resume_state is not None},
             stream_data={
                 "history_items": len(history),
+                "resumed": resume_state is not None,
                 "max_steps": self.config.max_steps,
                 "max_tool_calls": self.config.max_tool_calls,
                 "max_wall_time_s": self.config.max_wall_time_s,
@@ -567,7 +796,58 @@ class ReActAgent:
             },
         )
 
-        for step in range(1, self.config.max_steps + 1):
+        start_step = resume_state.next_step if resume_state is not None else 1
+        if resume_state is not None and resume_state.pending_tools:
+            recovered_calls = tuple(item.call for item in resume_state.pending_tools)
+            recovered_step = resume_state.next_step
+            try:
+                recovered_observations = await within_deadline(
+                    execute_batch(recovered_calls, recovered_step)
+                )
+            except TimeoutError:
+                await record(
+                    AgentJournalEventKind.BUDGET_EXHAUSTED,
+                    f"budget:s{recovered_step}:wall_time",
+                    step=recovered_step,
+                    public_data={
+                        "reason": "wall_time",
+                        "status": RunStatus.TIMED_OUT.value,
+                        "stop_reason": StopReason.WALL_TIME.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
+                final = result(RunStatus.TIMED_OUT, StopReason.WALL_TIME)
+                return await finish(final, step=recovered_step)
+            transcript.extend(recovered_observations)
+            for recovered in resume_state.pending_tools:
+                registered_tool = self.registry.get(recovered.call.name)
+                if registered_tool is not None and registered_tool.allow_repeated:
+                    continue
+                signature = tool_action_fingerprint(recovered.call)
+                action_counts[signature] = action_counts.get(signature, 0) + 1
+                if action_counts[signature] >= self.config.repeated_action_limit:
+                    await record(
+                        AgentJournalEventKind.LOOP_DETECTED,
+                        f"loop:{recovered.call_key}",
+                        step=recovered_step,
+                        call=recovered.call,
+                        call_key=recovered.call_key,
+                        public_data={
+                            "action_fingerprint": signature,
+                            "repeat_count": action_counts[signature],
+                            "repeat_limit": self.config.repeated_action_limit,
+                            "status": RunStatus.PARTIAL.value,
+                            "stop_reason": StopReason.LOOP_DETECTED.value,
+                            "terminal_decision": True,
+                        },
+                        private_data={"transcript": transcript_to_json(transcript)},
+                    )
+                    final = result(RunStatus.PARTIAL, StopReason.LOOP_DETECTED)
+                    return await finish(final, step=recovered_step)
+            start_step = recovered_step + 1
+
+        for step in range(start_step, self.config.max_steps + 1):
             tool_specs = self.registry.specs
             context_chars = _estimate_context_chars(
                 transcript,
@@ -575,6 +855,19 @@ class ReActAgent:
                 tool_specs=tool_specs,
             )
             if context_chars > self.config.max_context_chars:
+                await record(
+                    AgentJournalEventKind.BUDGET_EXHAUSTED,
+                    f"budget:s{step}:context_limit",
+                    step=step,
+                    public_data={
+                        "reason": "context_limit",
+                        "context_chars": context_chars,
+                        "status": RunStatus.PARTIAL.value,
+                        "stop_reason": StopReason.CONTEXT_LIMIT.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
                 await emit(
                     EventKind.BUDGET_EXHAUSTED,
                     step=step,
@@ -583,6 +876,16 @@ class ReActAgent:
                 final = result(RunStatus.PARTIAL, StopReason.CONTEXT_LIMIT)
                 return await finish(final, step=step)
             model_started_at = time.monotonic()
+            await record(
+                AgentJournalEventKind.MODEL_STARTED,
+                f"model:s{step}:started:{current_execution_id}",
+                step=step,
+                public_data={
+                    "model_call": model_calls + 1,
+                    "context_chars": context_chars,
+                },
+                private_data={"transcript": transcript_to_json(transcript)},
+            )
             await emit(
                 EventKind.MODEL_STARTED,
                 step=step,
@@ -605,25 +908,65 @@ class ReActAgent:
                 parallel_tool_calls=self.config.parallel_tool_calls,
             )
             try:
+                await guard_side_effect()
                 if stream_sink is not None and isinstance(self.model, StreamingModel):
                     model_call = self.model.complete_stream(request, forward_model_event)
                 else:
                     model_call = self.model.complete(request)
                 response = await within_deadline(model_call)
             except TimeoutError:
+                await record(
+                    AgentJournalEventKind.MODEL_FAILED,
+                    f"model:s{step}:failed:{current_execution_id}",
+                    step=step,
+                    public_data={
+                        "error_type": "timeout",
+                        "request_id": None,
+                        "status": RunStatus.TIMED_OUT.value,
+                        "stop_reason": StopReason.WALL_TIME.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
+                await record(
+                    AgentJournalEventKind.BUDGET_EXHAUSTED,
+                    f"budget:s{step}:wall_time",
+                    step=step,
+                    public_data={
+                        "reason": "wall_time",
+                        "status": RunStatus.TIMED_OUT.value,
+                        "stop_reason": StopReason.WALL_TIME.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
                 await emit(EventKind.BUDGET_EXHAUSTED, step=step, data={"reason": "wall_time"})
                 final = result(RunStatus.TIMED_OUT, StopReason.WALL_TIME)
                 return await finish(final, step=step)
             except ModelInvocationError as exc:
+                await record(
+                    AgentJournalEventKind.MODEL_FAILED,
+                    f"model:s{step}:failed:{current_execution_id}",
+                    step=step,
+                    public_data={
+                        "error_type": type(exc).__name__,
+                        "request_id": exc.request_id,
+                        "status": RunStatus.FAILED.value,
+                        "stop_reason": StopReason.MODEL_ERROR.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={
+                        "error": str(exc),
+                        "transcript": transcript_to_json(transcript),
+                    },
+                )
                 await emit(
                     EventKind.MODEL_FAILED,
                     step=step,
                     data={
                         "error_type": type(exc).__name__,
                         "request_id": exc.request_id,
-                        "duration_ms": round(
-                            (time.monotonic() - model_started_at) * 1000, 3
-                        ),
+                        "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
                     },
                 )
                 final = result(
@@ -635,15 +978,29 @@ class ReActAgent:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                await record(
+                    AgentJournalEventKind.MODEL_FAILED,
+                    f"model:s{step}:failed:{current_execution_id}",
+                    step=step,
+                    public_data={
+                        "error_type": type(exc).__name__,
+                        "request_id": None,
+                        "status": RunStatus.FAILED.value,
+                        "stop_reason": StopReason.MODEL_ERROR.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={
+                        "error": f"Model adapter failed: {type(exc).__name__}",
+                        "transcript": transcript_to_json(transcript),
+                    },
+                )
                 await emit(
                     EventKind.MODEL_FAILED,
                     step=step,
                     data={
                         "error_type": type(exc).__name__,
                         "request_id": None,
-                        "duration_ms": round(
-                            (time.monotonic() - model_started_at) * 1000, 3
-                        ),
+                        "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
                     },
                 )
                 final = result(
@@ -656,6 +1013,117 @@ class ReActAgent:
             usage = usage + response.usage
             message = response.message
             transcript.append(message)
+            terminal_status: RunStatus | None = None
+            terminal_reason: StopReason | None = None
+            terminal_output: str | None = None
+            terminal_error: str | None = None
+            terminal_observations: list[ToolMessage] = []
+            ids = [call.id for call in message.tool_calls]
+            malformed = any(not call.id or not call.name for call in message.tool_calls)
+            if response.outcome is not ModelOutcome.COMPLETED:
+                code = (
+                    "MODEL_REFUSAL"
+                    if response.outcome is ModelOutcome.REFUSED
+                    else "MODEL_OUTPUT_INCOMPLETE"
+                )
+                terminal_observations = [
+                    ToolMessage(
+                        call_id=call.id,
+                        name=call.name,
+                        content=json.dumps(
+                            {
+                                "ok": False,
+                                "error": {
+                                    "code": code,
+                                    "message": (
+                                        "The model did not return a complete executable call."
+                                    ),
+                                    "retryable": False,
+                                },
+                            },
+                            separators=(",", ":"),
+                        ),
+                        is_error=True,
+                    )
+                    for call in message.tool_calls
+                ]
+                terminal_status = (
+                    RunStatus.FAILED
+                    if response.outcome is ModelOutcome.REFUSED
+                    else RunStatus.PARTIAL
+                )
+                terminal_reason = (
+                    StopReason.MODEL_REFUSAL
+                    if response.outcome is ModelOutcome.REFUSED
+                    else StopReason.MODEL_INCOMPLETE
+                )
+                terminal_output = message.content
+                terminal_error = response.diagnostic
+            elif not message.tool_calls:
+                if message.content is None or not message.content.strip():
+                    terminal_status = RunStatus.FAILED
+                    terminal_reason = StopReason.PROTOCOL_ERROR
+                    terminal_error = (
+                        "Model returned neither tool calls nor a final answer."
+                    )
+                else:
+                    terminal_status = RunStatus.COMPLETED
+                    terminal_reason = StopReason.COMPLETED
+                    terminal_output = message.content
+            elif malformed or len(ids) != len(set(ids)):
+                terminal_status = RunStatus.FAILED
+                terminal_reason = StopReason.PROTOCOL_ERROR
+                terminal_error = (
+                    "Model returned a malformed or duplicate tool call id/name."
+                )
+
+            first_delta_at = model_first_delta_at.get(step)
+            ttfc_ms = (
+                round((first_delta_at - model_started_at) * 1000, 3)
+                if first_delta_at is not None
+                else None
+            )
+            model_public: dict[str, JsonValue] = {
+                "tool_calls": len(message.tool_calls),
+                "output_chars": len(message.content or ""),
+                # The accumulated provider-neutral answer is the durable
+                # correction for an interrupted/reconnected live stream.
+                # Raw provider items and reasoning state remain excluded.
+                "final_text": message.content,
+                "request_id": response.request_id,
+                "response_model": response.response_model,
+                "finish_reason": response.finish_reason,
+                "outcome": response.outcome.value,
+                "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
+                "ttfc_ms": ttfc_ms,
+                "usage": _usage_data(response.usage),
+            }
+            terminal_transcript = [*transcript, *terminal_observations]
+            model_private: dict[str, JsonValue] = {
+                "message": transcript_item_to_json(message),
+                "transcript": transcript_to_json(terminal_transcript),
+            }
+            if terminal_status is not None and terminal_reason is not None:
+                model_public.update(
+                    {
+                        "status": terminal_status.value,
+                        "stop_reason": terminal_reason.value,
+                        "terminal_decision": True,
+                    }
+                )
+                model_private.update(
+                    {
+                        "output": terminal_output,
+                        "error": terminal_error,
+                    }
+                )
+            await record(
+                AgentJournalEventKind.MODEL_COMPLETED,
+                f"model:s{step}:completed",
+                step=step,
+                public_data=model_public,
+                private_data=model_private,
+            )
             await emit(
                 EventKind.MODEL_COMPLETED,
                 step=step,
@@ -663,106 +1131,66 @@ class ReActAgent:
                     "tool_calls": len(message.tool_calls),
                     "output_chars": len(message.content or ""),
                     "request_id": response.request_id,
+                    "response_model": response.response_model,
                     "finish_reason": response.finish_reason,
                     "outcome": response.outcome.value,
-                    "duration_ms": round(
-                        (time.monotonic() - model_started_at) * 1000, 3
-                    ),
+                    "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
+                    "ttfc_ms": ttfc_ms,
                 },
                 stream_data={
                     "model_call": model_calls,
                     "tool_calls": len(message.tool_calls),
                     "output_chars": len(message.content or ""),
                     "request_id": response.request_id,
+                    "response_model": response.response_model,
                     "finish_reason": response.finish_reason,
                     "outcome": response.outcome.value,
-                    "duration_ms": round(
-                        (time.monotonic() - model_started_at) * 1000, 3
-                    ),
-                    "usage": {
-                        "input_tokens": response.usage.input_tokens,
-                        "output_tokens": response.usage.output_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                    },
+                    "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
+                    "ttfc_ms": ttfc_ms,
+                    "usage": _usage_data(response.usage),
                 },
             )
 
-            if response.outcome is not ModelOutcome.COMPLETED:
-                if message.tool_calls:
-                    tool_calls += len(message.tool_calls)
-                    code = (
-                        "MODEL_REFUSAL"
-                        if response.outcome is ModelOutcome.REFUSED
-                        else "MODEL_OUTPUT_INCOMPLETE"
-                    )
-                    transcript.extend(
-                        ToolMessage(
-                            call_id=call.id,
-                            name=call.name,
-                            content=json.dumps(
-                                {
-                                    "ok": False,
-                                    "error": {
-                                        "code": code,
-                                        "message": (
-                                            "The model did not return a complete executable call."
-                                        ),
-                                        "retryable": False,
-                                    },
-                                },
-                                separators=(",", ":"),
-                            ),
-                            is_error=True,
-                        )
-                        for call in message.tool_calls
-                    )
-                if response.outcome is ModelOutcome.REFUSED:
-                    final = result(
-                        RunStatus.FAILED,
-                        StopReason.MODEL_REFUSAL,
-                        output=message.content,
-                        error=response.diagnostic,
-                    )
-                else:
-                    final = result(
-                        RunStatus.PARTIAL,
-                        StopReason.MODEL_INCOMPLETE,
-                        output=message.content,
-                        error=response.diagnostic,
-                    )
-                return await finish(final, step=step)
-
-            if not message.tool_calls:
-                if message.content is None or not message.content.strip():
-                    final = result(
-                        RunStatus.FAILED,
-                        StopReason.PROTOCOL_ERROR,
-                        error="Model returned neither tool calls nor a final answer.",
-                    )
-                else:
-                    final = result(
-                        RunStatus.COMPLETED,
-                        StopReason.COMPLETED,
-                        output=message.content,
-                    )
-                return await finish(final, step=step)
-
-            ids = [call.id for call in message.tool_calls]
-            malformed = any(not call.id or not call.name for call in message.tool_calls)
-            if malformed or len(ids) != len(set(ids)):
+            if terminal_status is not None and terminal_reason is not None:
+                if terminal_observations:
+                    tool_calls += len(terminal_observations)
+                    transcript.extend(terminal_observations)
                 final = result(
-                    RunStatus.FAILED,
-                    StopReason.PROTOCOL_ERROR,
-                    error="Model returned a malformed or duplicate tool call id/name.",
+                    terminal_status,
+                    terminal_reason,
+                    output=terminal_output,
+                    error=terminal_error,
                 )
                 return await finish(final, step=step)
 
             for tool_index, call in enumerate(message.tool_calls):
+                call_key = f"s{step}:t{tool_index}"
+                planned_public = argument_debug_data(call)
+                planned_public["resume_policy"] = (
+                    registered.resume_policy.value
+                    if (registered := self.registry.get(call.name)) is not None
+                    else "require_operator"
+                )
+                await record(
+                    AgentJournalEventKind.TOOL_PLANNED,
+                    f"tool:{call_key}:planned",
+                    step=step,
+                    call=call,
+                    call_key=call_key,
+                    public_data=planned_public,
+                    private_data={
+                        "call": {
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        }
+                    },
+                )
                 await emit_stream(
                     AgentStreamEventKind.MODEL_TOOL_CALL_READY,
                     step=step,
                     call=call,
-                    call_key=f"s{step}:t{tool_index}",
+                    call_key=call_key,
                     data=argument_debug_data(call),
                 )
 
@@ -789,6 +1217,18 @@ class ReActAgent:
                     for call in message.tool_calls
                 ]
                 transcript.extend(budget_results)
+                await record(
+                    AgentJournalEventKind.BUDGET_EXHAUSTED,
+                    f"budget:s{step}:max_tool_calls",
+                    step=step,
+                    public_data={
+                        "reason": "max_tool_calls",
+                        "status": RunStatus.PARTIAL.value,
+                        "stop_reason": StopReason.MAX_TOOL_CALLS.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
                 await emit(
                     EventKind.BUDGET_EXHAUSTED,
                     step=step,
@@ -835,6 +1275,18 @@ class ReActAgent:
                     for call in message.tool_calls
                 ]
                 transcript.extend(observations)
+                await record(
+                    AgentJournalEventKind.BUDGET_EXHAUSTED,
+                    f"budget:s{step}:wall_time",
+                    step=step,
+                    public_data={
+                        "reason": "wall_time",
+                        "status": RunStatus.TIMED_OUT.value,
+                        "stop_reason": StopReason.WALL_TIME.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
                 await emit(EventKind.BUDGET_EXHAUSTED, step=step, data={"reason": "wall_time"})
                 for tool_index, (call, timeout_result) in enumerate(
                     zip(message.tool_calls, observations, strict=True)
@@ -858,14 +1310,31 @@ class ReActAgent:
                 registered_tool = self.registry.get(call.name)
                 if registered_tool is not None and registered_tool.allow_repeated:
                     continue
-                signature = _fingerprint(call)
+                signature = tool_action_fingerprint(call)
                 action_counts[signature] = action_counts.get(signature, 0) + 1
                 if action_counts[signature] >= self.config.repeated_action_limit:
+                    call_key = f"s{step}:t{tool_index}"
+                    await record(
+                        AgentJournalEventKind.LOOP_DETECTED,
+                        f"loop:{call_key}",
+                        step=step,
+                        call=call,
+                        call_key=call_key,
+                        public_data={
+                            "action_fingerprint": signature,
+                            "repeat_count": action_counts[signature],
+                            "repeat_limit": self.config.repeated_action_limit,
+                            "status": RunStatus.PARTIAL.value,
+                            "stop_reason": StopReason.LOOP_DETECTED.value,
+                            "terminal_decision": True,
+                        },
+                        private_data={"transcript": transcript_to_json(transcript)},
+                    )
                     await emit(
                         EventKind.LOOP_DETECTED,
                         step=step,
                         call=call,
-                        call_key=f"s{step}:t{tool_index}",
+                        call_key=call_key,
                         data={
                             "repeat_count": action_counts[signature],
                             "repeat_limit": self.config.repeated_action_limit,
@@ -874,6 +1343,18 @@ class ReActAgent:
                     final = result(RunStatus.PARTIAL, StopReason.LOOP_DETECTED)
                     return await finish(final, step=step)
 
+        await record(
+            AgentJournalEventKind.BUDGET_EXHAUSTED,
+            f"budget:s{self.config.max_steps}:max_steps",
+            step=self.config.max_steps,
+            public_data={
+                "reason": "max_steps",
+                "status": RunStatus.PARTIAL.value,
+                "stop_reason": StopReason.MAX_STEPS.value,
+                "terminal_decision": True,
+            },
+            private_data={"transcript": transcript_to_json(transcript)},
+        )
         await emit(
             EventKind.BUDGET_EXHAUSTED,
             step=self.config.max_steps,

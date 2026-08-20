@@ -194,6 +194,7 @@ async def test_chat_completions_http_contract_omits_disabled_capability_fields()
     assert "store" not in payload
     assert "strict" not in payload["tools"][0]["function"]
     assert response.message.tool_calls == (ToolCall("call-next", "get_weather", '{"city":"广州"}'),)
+    assert response.response_model == "test-model"
     assert response.usage.total_tokens == 18
 
 

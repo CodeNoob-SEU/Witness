@@ -20,6 +20,8 @@ from react_agent import (
     tool,
 )
 from react_agent.models import (
+    AgentJournalEvent,
+    AgentJournalEventKind,
     AgentStreamEvent,
     AgentStreamEventKind,
     ModelStreamEvent,
@@ -606,6 +608,70 @@ async def test_metadata_debug_exposure_never_reveals_arguments_or_results() -> N
         event for event in streamed if event.kind is AgentStreamEventKind.TOOL_RESULT
     ]
     assert "result" not in tool_result.data
+
+
+@pytest.mark.asyncio
+async def test_durable_debug_projection_replays_final_text_and_opted_in_tool_io() -> None:
+    provider_secret = "opaque-encrypted-reasoning"
+
+    @tool(debug_exposure=DebugExposure.FULL)
+    def add(left: int, right: int) -> int:
+        """Add integers with explicit durable debug exposure."""
+
+        return left + right
+
+    model = ScriptedModel(
+        ModelResponse(
+            AssistantMessage(
+                tool_calls=(ToolCall("call-add", "add", '{"left":20,"right":22}'),),
+                raw_items=(
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": provider_secret,
+                    },
+                ),
+            )
+        ),
+        model_turn("最终答案是 42"),
+    )
+    journaled: list[AgentJournalEvent] = []
+
+    result = await ReActAgent(model, [add]).run(
+        "计算",
+        journal_sink=journaled.append,
+    )
+
+    assert result.output == "最终答案是 42"
+    completed_models = [
+        event
+        for event in journaled
+        if event.kind is AgentJournalEventKind.MODEL_COMPLETED
+    ]
+    assert [event.public_data["final_text"] for event in completed_models] == [
+        None,
+        "最终答案是 42",
+    ]
+    [planned] = [
+        event for event in journaled if event.kind is AgentJournalEventKind.TOOL_PLANNED
+    ]
+    assert planned.public_data["arguments"] == '{"left":20,"right":22}'
+    [completed_tool] = [
+        event
+        for event in journaled
+        if event.kind is AgentJournalEventKind.TOOL_COMPLETED
+    ]
+    assert json.loads(str(completed_tool.public_data["result"]))["data"] == 42
+    serialized = json.dumps(
+        [
+            {
+                "public": dict(event.public_data),
+                "private": dict(event.private_data),
+            }
+            for event in journaled
+        ],
+        ensure_ascii=False,
+    )
+    assert provider_secret not in serialized
 
 
 @pytest.mark.asyncio

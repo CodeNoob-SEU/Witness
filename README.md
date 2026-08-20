@@ -37,8 +37,8 @@
 uv sync --extra dev
 ```
 
-若不使用 uv，也可以执行 `python -m pip install -e .`；运行时依赖仅有 OpenAI Python SDK
-与 Pydantic。
+若不使用 uv，也可以执行 `python -m pip install -e .`。基础安装包含 OpenAI SDK、Pydantic、
+FastAPI/Uvicorn 和 PostgreSQL adapter；OpenTelemetry 仍是独立的 `otel` extra。
 
 然后设置至少两个环境变量：
 
@@ -60,6 +60,22 @@ python examples/quickstart.py
 | `OPENAI_MODEL` | 是 | CLI 和 quickstart 使用的模型名。库的 `OpenAIModel(model=...)` 仍要求显式传入模型名。 |
 | `OPENAI_BASE_URL` | 否 | 兼容服务入口，例如 `https://example.com/v1`。未设置时使用 OpenAI SDK 默认值。 |
 | `OPENAI_API_MODE` | 否 | `responses`（默认）或 `chat_completions`；由 CLI 和 quickstart 读取。 |
+| `OPENAI_COMPAT_MODE` | 否 | Web 兼容模式；`true` 时省略 strict/store/parallel 等常被第三方拒绝的可选字段。 |
+| `OPENAI_ALLOW_INSECURE_HTTP` | 否 | 默认 `false`；仅可信私网且无法提供 HTTPS 时才允许设为 `true`。 |
+| `REACT_AGENT_POSTGRES_DSN` | 生产建议 | Durable journal DSN，优先于 `DATABASE_URL`；必须作为 secret 注入。 |
+| `DATABASE_URL` | 否 | PostgreSQL DSN 的兼容 fallback。两个 DSN 都未设置时使用进程内 journal。 |
+| `REACT_AGENT_REPOSITORY` | 否，成对 | 要隔离操作的 non-bare Git worktree。必须与 `REACT_AGENT_WORKTREE_ROOT` 同时设置。 |
+| `REACT_AGENT_WORKTREE_ROOT` | 否，成对 | Session worktree 的独立 managed root；不能与 repository 互相包含。 |
+| `REACT_AGENT_WEB_HOST` | 否 | Web 监听地址，默认 `127.0.0.1`。 |
+| `REACT_AGENT_WEB_PORT` | 否 | Web 监听端口，默认 `8000`。 |
+| `OTEL_SERVICE_NAME` | 否 | OpenTelemetry service name。 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 否 | OTLP Collector endpoint；需先初始化 OTel SDK/provider。 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | 否 | 本地示例使用 `http/protobuf`。 |
+| `OTEL_TRACES_EXPORTER` | OTel 本地栈 | 设为 `otlp` 才会由 auto-instrumentation 初始化 trace exporter。 |
+| `OTEL_METRICS_EXPORTER` | OTel 本地栈 | 设为 `otlp` 才会由 auto-instrumentation 初始化 metric exporter。 |
+| `OTEL_LOGS_EXPORTER` | OTel 本地栈 | 设为 `otlp` 才会由 auto-instrumentation 初始化 log exporter。 |
+| `REACT_AGENT_OTEL_METRIC_ALLOWED_MODELS` | 否 | 逗号分隔的精确模型 metric label allowlist；未设置时 Web 固定使用当前 `OPENAI_MODEL`。最多 64 项，不支持通配符。 |
+| `REACT_AGENT_OTEL_METRIC_ALLOWED_TOOLS` | 否 | 逗号分隔的精确工具 metric label allowlist；未设置时 Web 固定使用启动时已注册工具名。最多 64 项，不支持通配符。 |
 
 不要提交真实 key。第三方 `OPENAI_BASE_URL` 会收到用户消息、工具定义和工具结果，只应连接你信任的服务，并保持 TLS 校验开启。
 非回环地址默认必须使用 HTTPS；可信内网若只能使用 HTTP，需要显式传入
@@ -338,33 +354,250 @@ react-agent --api-mode chat_completions --compat "你好"
 
 `--compat` 会省略 `strict`、`parallel_tool_calls` 和 `store` 等可选 provider 字段。
 
+## Durable Runtime
+
+`ReActAgent` 负责一次确定的模型/工具循环；`AgentRuntime` 在其外层提供可恢复执行、Session
+提交、事件跟随、成本记录、遥测和可选工作区检查点。每个 Run 都是一条 append-only 事实链：
+
+- durable event 使用严格递增的 `sequence`，并通过前向 hash 链校验缺失、乱序或篡改；
+- append 与 Session commit 使用 compare-and-swap，避免多 worker 静默覆盖状态；
+- Start/Fork 接受幂等键，相同请求只会保留一个 Run；
+- 执行权由带 fencing token 的租约保护，过期 worker 无法继续提交事实；
+- Replay 只从事件折叠状态，恢复逻辑不会从日志文本猜测下一步。
+
+生产环境应把 PostgreSQL journal 作为唯一 source of truth。PostgreSQL 的 `LISTEN/NOTIFY`
+只负责低延迟唤醒 follower，不承载事实；消费者始终按 `sequence` 查询表，并有轮询兜底，因此
+通知合并、丢失或进程重启不会丢 durable event。未配置数据库时使用 `InMemoryRunJournal`，适合
+本地开发和单进程测试，但进程重启后 Run、Session、幂等预留与恢复状态都会丢失。
+
+## PostgreSQL 与独立 migration
+
+Web 启动时优先读取 `REACT_AGENT_POSTGRES_DSN`，未设置时兼容读取 `DATABASE_URL`。应用不会在
+启动路径自动建表或升级 schema；生产发布应先运行一次独立 migration job，再滚动启动应用：
+
+```bash
+uv run python - <<'PY'
+import asyncio
+import os
+
+from react_agent.postgres_journal import PostgresRunJournal
+
+
+async def main() -> None:
+    async with PostgresRunJournal(
+        os.environ["REACT_AGENT_POSTGRES_DSN"]
+    ) as journal:
+        await journal.migrate()
+
+
+asyncio.run(main())
+PY
+```
+
+DSN 只从环境或 secret manager 注入，不要放进命令参数、镜像、日志或仓库。migration 是幂等的，
+并使用 PostgreSQL advisory lock 防止多个部署任务并发升级。应用账号和 migration 账号可按最小权限
+分离；若两个 DSN 变量同时存在，以 `REACT_AGENT_POSTGRES_DSN` 为准。
+
+Public event 虽然已经脱敏，但数据库中的 private checkpoint 可能包含完整 transcript、工具调用参数
+与工具结果；provider raw state、reasoning 和原始流事件不会写入 journal。应限制基表与备份的访问，
+启用传输/静态加密，并按组织策略设置保留期；不要把 PostgreSQL 当作可以公开查询的日志库。
+
+Migration 会创建不含 `private_payload` 的安全屏障视图
+`react_agent_public_run_events`。部署方可把该视图的 `SELECT` 单独授予 Observer/Audit 角色，同时明确
+撤销该角色对 `react_agent_run_events`、Snapshot 与 Session 基表的权限；Runtime 角色仍需按其读写
+路径授予最小权限。Migration 不会擅自创建组织角色，也不会修改已有角色成员关系。
+
+未设置任一 DSN 时 Web 仍可启动，但这是明确的进程内模式，不具备跨进程协调或跨重启持久性。
+生产环境不要把这个 fallback 当作数据库故障时的自动降级。
+
+## Runtime HTTP API
+
+工作台优先使用 durable Runtime API；旧的 `/api/chat` 和 `/api/chat/stream` 仍通过 Runtime
+facade 保持兼容。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/runs` | 创建 Run，返回 `202` Run handle。 |
+| `GET` | `/api/runs/{run_id}` | 读取当前脱敏 snapshot。 |
+| `GET` | `/api/runs/{run_id}/events?after_sequence=0&follow=true` | 重放 durable event，并可继续跟随 live event。 |
+| `GET` | `/api/sessions/{session_id}/runs` | 列出一个 Session 的 Run 历史。 |
+| `POST` | `/api/runs/{run_id}/resume` | 从 durable state 恢复执行。 |
+| `POST` | `/api/runs/{run_id}/fork` | 从安全 checkpoint 创建独立 lineage。 |
+| `POST` | `/api/runs/{run_id}/resolve` | 处理需要人工确认的未知工具状态。 |
+| `POST` | `/api/runs/{run_id}/cost-adjustments` | 追加账单/人工成本修订，并返回合并后的 snapshot。 |
+| `POST` | `/api/runs/{run_id}/cancel` | 显式请求取消后台 Run。 |
+
+Runtime Start 使用 `prompt` 字段；兼容接口 `/api/chat` 与 `/api/chat/stream` 继续使用
+`message`。对 Start 和 Fork 建议总是发送稳定的
+`Idempotency-Key`；同一个 key 如果对应不同请求内容会返回冲突，而不是误复用：
+
+```bash
+curl -sS http://127.0.0.1:8000/api/runs \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: client-request-001' \
+  -d '{"prompt":"请调用工具计算 21 * 2","session_id":"demo-session"}'
+```
+
+Reconciliation 的操作是 `retry`、`use_result` 或 `abort`：
+
+```json
+{
+  "call_key": "stable-call-key",
+  "action": "use_result",
+  "result": {"ok": true, "data": {"status": "confirmed"}}
+}
+```
+
+`use_result` 只应提交操作员已从外部系统确认过的结果。不要通过它猜测一个有副作用的调用是否成功。
+
+成本修订建议始终发送稳定的 `Idempotency-Key`。`revised_total_microunits` 是该模型操作修订后的
+总成本（货币微单位），不是本次差额；Runtime 会把差额作为新的 immutable record 追加：
+
+```json
+{
+  "previous_record_id": "cost-record-id",
+  "revised_total_microunits": 375,
+  "note": "provider invoice"
+}
+```
+
+## SSE、流式输出与断线恢复
+
+Runtime SSE 明确区分两类事件：
+
+- durable event 是可恢复事实，带 SSE `id`，其值就是 durable `sequence`；
+- 模型文本/refusal/tool-call delta 是低延迟 live event，没有 SSE `id`，不会伪造恢复游标。
+
+客户端重连时可同时发送查询参数 `after_sequence` 和请求头 `Last-Event-ID`，服务端取两者中的
+较大值。重连会从 PostgreSQL 重放 durable facts，再继续跟随当前执行；瞬时 token delta 只用于改善
+现场体验，不承诺重放。模型完成后的权威文本和最终回答会进入脱敏 snapshot，因此即使中间 delta
+缺失，工作台仍能恢复最终答案和执行状态。
+
+关闭 SSE follower、刷新页面或点击工作台的“停止关注”只会断开该浏览器订阅，不会取消后台 Run。
+只有调用 `/cancel`（或工作台对应的显式 Cancel 操作）才是取消请求。follower 断开后 Runtime 继续
+执行并写 journal；页面把 durable 游标保存在 `sessionStorage`，恢复后从该游标重连。
+
+## Resume 恢复矩阵
+
+恢复必须依据已经提交的事实和工具的幂等声明，不能依靠“通常不会重复”的假设：
+
+| 中断状态 | Resume 行为 |
+| --- | --- |
+| 模型调用已开始但未提交完成 | 写入 `model_abandoned`，将该次成本记为未知，再发起新的模型 attempt。 |
+| 工具已计划但尚未执行 | 从 durable tool plan 继续。 |
+| 幂等工具执行中断 | 使用稳定 idempotency key 自动重试。 |
+| 工具已完成或已有复用事实 | 使用 durable `ToolMessage`，不重复执行 provider。 |
+| 非幂等工具状态不确定 | Fail closed，进入 reconciliation，不调用 provider。 |
+| 已有 final result、仅 Session commit 中断 | 幂等完成 commit，不重复调用模型或工具。 |
+| Agent revision 或 tool manifest 不一致 | `ResumeRejected`；需要显式 Fork。 |
+| Run 绑定 workspace，但恢复进程未配置 workspace adapter | `ResumeRejected`。 |
+| Workspace 偏离且待恢复工具幂等 | 恢复最后安全 checkpoint 后重试。 |
+| Workspace 偏离且待恢复工具非幂等 | 不恢复、不重放，进入 reconciliation。 |
+| Run 已是终态 | 返回现有状态，不创建新的 execution。 |
+
+`retry` 仅适用于可以安全重试、或操作员已经确认外部系统没有执行原调用的情况；
+`use_result` 注入已核实的结果；`abort` 以显式事实终止 Run。
+
+## Replay 与 Fork
+
+Replay 是 public durable event 上的只读纯 reducer：不调用模型、不执行工具、不写新事件，也不产生
+telemetry。它适合审计、历史查看和 UI 时间旅行，但不能展示被隐私策略排除的 prompt、reasoning、
+凭据或 opaque provider state。
+
+Fork 只允许从标记为 safe 的 durable checkpoint 创建。新 Run 使用独立 Session 和独立 workspace
+lineage；父 Run 保持不可变。需要改变 Agent revision、工具清单或从旧执行探索另一条路径时，应 Fork，
+而不是绕过 Resume 的一致性检查。
+
+## 隔离 Git worktree
+
+同时设置 `REACT_AGENT_REPOSITORY` 与 `REACT_AGENT_WORKTREE_ROOT` 可启用 workspace adapter：
+
+- 每个 Session 在 managed root 下拥有一个 detached Git worktree，主工作树不会被直接修改；
+- checkpoint 使用内部 Git ref 固定不可变 tree，并记录内容无关的 diff 摘要；
+- `.env`、私钥、证书、credentials、云凭据等敏感路径默认拒绝进入 checkpoint；
+- repository 必须是真实的 non-bare Git worktree；managed root 不能是 symlink；
+- repository 与 managed root 必须互不包含，避免清理或 Git 操作越界。
+
+两个变量必须成对设置。路径约束不满足时应用会 fail closed，而不是退回主工作树执行。
+
+## 成本账本
+
+成本是 append-only ledger：模型完成时的冻结估算写入 Run 的 `cost_recorded` 事实；供应商账单或
+人工修订则追加到独立的 `react_agent_cost_adjustments` 审计账本，不会原地改写历史。独立账本有自己的
+`ledger_sequence`，它不是 Run durable sequence，不能用作 SSE `Last-Event-ID`。因此即使 Run 已经
+terminal，对账也不会重开 Run、改变 terminal sequence/hash，或伪造一个 terminal 后事件。
+
+`GET /api/runs/{run_id}` 和 Session history 会在读取时合并两个账本，页面刷新后 Cost 页签也会展示
+修订记录。token usage 始终保留；如果当前 pricing catalog 没有匹配价格，成本是 `null/unknown` 并
+附带原因，绝不能显示为 0。未完成的模型 attempt 也可能已经计费，因此 Resume 会把它记录为成本
+未知。修订必须引用当前操作链的最新 `record_id`；稳定 `Idempotency-Key` 的相同重试只写一条，
+相同 key 或 record id 对应不同内容会返回冲突。
+
+工作台的 Cost 页签展示逐条 ledger、累计值和未知原因，适合后续接账单对账，但它不是供应商发票。
+
 ## ReAct 调试工作台
 
-项目自带一个同源 FastAPI 单页工作台。左侧是流式对话，右侧按顺序显示每轮模型调用、
-文本 delta、工具参数、工具执行结果、耗时、usage、预算与最终提交状态。API key 只保留在
-服务端环境变量中，不会发送给浏览器。使用兼容端点时，启动方式如下：
+项目自带同源 FastAPI 单页工作台。左侧是流式对话，右侧提供：
+
+- **Live**：当前 Run、执行阶段、模型与工具卡片、预算、usage 和人工处置入口；
+- **Timeline**：按收到顺序展示模型 delta、工具计划/参数、开始、结果、错误与终态；
+- **Audit**：按 durable/live 序号检查公共事件 JSON、缺口与重复；
+- **Replay**：拖动 durable sequence，从纯 reducer 查看当时状态并从安全点 Fork；
+- **Workspace Diff**：查看 checkpoint、偏离状态与内容无关的 diff 摘要；
+- **Cost**：查看估算、调整、累计成本和 unknown 原因；
+- **History**：读取 Session Run 历史并重新连接后台执行。
+
+API key 只保留在服务端环境变量中，不会发送给浏览器。使用兼容端点时：
 
 ```bash
 export OPENAI_API_KEY="你的 API key"
-export OPENAI_BASE_URL="https://api.hai-lab.cn/v1"
+export OPENAI_BASE_URL="https://trusted-provider.example/v1"
 export OPENAI_MODEL="gpt-5.6-terra"
 export OPENAI_API_MODE="chat_completions"
+# 仅当兼容服务拒绝 strict/store/parallel 等可选字段时启用：
+export OPENAI_COMPAT_MODE=true
 uv run react-agent-web
 ```
 
-然后打开 <http://127.0.0.1:8000/>。页面支持连续对话、停止当前运行、新对话、移动端布局，
-并注册了一个只允许基础算术且允许完整调试展示的本地计算工具。`POST /api/chat/stream`
-使用 fetch + SSE 返回实时事件；旧的 `POST /api/chat` 非流接口继续保留。默认仅监听
-`127.0.0.1`；如需修改，
-可设置 `REACT_AGENT_WEB_HOST` 和 `REACT_AGENT_WEB_PORT`。
+打开 <http://127.0.0.1:8000/>。默认只监听 `127.0.0.1`；可通过
+`REACT_AGENT_WEB_HOST` 和 `REACT_AGENT_WEB_PORT` 修改。页面优先使用 Runtime API，旧服务没有
+这些路由时才回落到 `/api/chat/stream`。内置 `calculate_expression` 只允许基础算术，并显式允许
+在调试 UI 展示参数与结果；其他工具默认只暴露 metadata。
 
-Web 会话只提交 `completed` 回合；超时、失败或 partial 回合会在界面标记“本轮未写入上下文”，
-避免把不完整的 provider transcript 带入下一轮。内置计算工具无副作用；若自行接入写操作工具，
-还应在业务层使用幂等键记录实际执行结果。
+浏览器网络面板和 `sessionStorage` 都能看到获准公开的调试数据。不要给读取凭据、文件、个人数据或
+第三方敏感响应的工具启用 `DebugExposure.FULL`，也不要把工作台暴露到不可信网络。
 
-浏览器断线且未收到 `done` 或 `stream_error` 时，页面会显示“提交状态未知”且不会自动重放，
-因为一次工具调用可能已经产生副作用。当前最小实现不提供断线重连；需要跨断线恢复时，应在应用层
-增加带客户端幂等 ID 的 run registry、可重放事件 ring 和 `Last-Event-ID`，而不是重新 POST。
+## OpenTelemetry
+
+OpenTelemetry 是可选能力。安装 adapter 与自动 instrumentation，并连接本地 Collector：
+
+```bash
+uv sync --extra otel
+docker compose -f docker-compose.observability.yml up -d
+
+export OTEL_SERVICE_NAME=react-agent
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+# 可选：为本地验收显式固定有界 metric labels；不要使用通配符。
+export REACT_AGENT_OTEL_METRIC_ALLOWED_MODELS=gpt-5.6-terra
+export REACT_AGENT_OTEL_METRIC_ALLOWED_TOOLS=calculate_expression
+uv run opentelemetry-instrument react-agent-web
+```
+
+Jaeger UI 位于 <http://127.0.0.1:16686>，Prometheus UI 位于
+<http://127.0.0.1:9090>。完整的启动、检查、tail sampling 与生产注意事项见
+[`deploy/otel/README.md`](deploy/otel/README.md)。
+
+Telemetry 使用显式 allowlist，不导出 prompt、system instructions、工具参数/结果、reasoning、
+provider 原始事件或凭据；Replay 完全抑制 telemetry。Web 默认把当前配置的单个模型名和启动时
+有限的工具 registry 冻结为 metric allowlist，因此 `gpt-5.6-terra` 与
+`calculate_expression` 在默认验收中不会退化为 `other`。部署可用上述变量精确覆盖；每项最多
+64 个、单值最多 128 字符，空项、控制字符和 `*` 均会让启动失败。`run_id`、`request_id`、
+`tool_call_id` 等高基数字段可用于 trace/log 关联，但不会作为 metric dimensions。OTel API
+不可用时 `create_telemetry()` 返回 NoOp；只安装 API 而未初始化 SDK/provider 时也不会导出数据。
 
 ## 开发验证
 

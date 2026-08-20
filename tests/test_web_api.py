@@ -208,6 +208,7 @@ async def test_homepage_and_health_are_safe_same_origin_surfaces() -> None:
     assert "new AbortController()" in homepage.text
     assert "resetConversationView()" in homepage.text
     assert "本轮未写入上下文" in homepage.text
+    assert "firstDefined(data.tree_id, data.workspace_tree" in homepage.text
     assert health.status_code == 200
     assert health.json() == {
         "status": "ok",

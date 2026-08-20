@@ -12,6 +12,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "openai>=2.30,<3",
   "pydantic>=2.10,<3",
+  "psycopg[binary,pool]>=3.2,<4",
   "uvicorn>=0.34,<1",
 ]
 
@@ -23,6 +24,15 @@ dev = [
   "pytest-asyncio>=0.25,<2",
   "ruff>=0.9,<1",
 ]
+otel = [
+  "opentelemetry-api>=1.36,<2",
+  "opentelemetry-distro>=0.57b0,<1",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.36,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.36,<2",
+  "opentelemetry-instrumentation-fastapi>=0.57b0,<1",
+  "opentelemetry-instrumentation-httpx>=0.57b0,<1",
+  "opentelemetry-sdk>=1.36,<2",
+]
 
 [project.scripts]
 react-agent = "react_agent.cli:main"
@@ -30,6 +40,9 @@ react-agent-web = "react_agent.web:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/react_agent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "react_agent/migrations"
 
 [tool.pytest.ini_options]
 addopts = "-ra"
