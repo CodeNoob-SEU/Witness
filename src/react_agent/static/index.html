@@ -1,0 +1,1388 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>ReAct Agent Workbench</title>
+    <style>
+      :root {
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: #16231b;
+        background: #e8eee9;
+        font-synthesis: none;
+        --muted: #657169;
+        --line: #d2dcd4;
+        --panel: rgba(252, 253, 251, 0.92);
+        --green: #216b49;
+        --green-dark: #18583b;
+        --green-soft: #e8f3ec;
+        --amber: #996318;
+        --amber-soft: #fff5df;
+        --red: #9a3d35;
+        --red-soft: #fff0ee;
+        --blue: #326789;
+        --blue-soft: #eaf4fa;
+        --shadow: 0 22px 60px rgba(42, 66, 50, 0.11);
+      }
+
+      * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
+      html, body { min-height: 100%; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 8% 2%, rgba(181, 219, 193, 0.66), transparent 31rem),
+          radial-gradient(circle at 94% 94%, rgba(191, 216, 205, 0.48), transparent 34rem),
+          linear-gradient(155deg, #f6f8f4 0%, #e7eee8 100%);
+      }
+
+      button, textarea { font: inherit; }
+      button:focus-visible, textarea:focus-visible {
+        outline: 3px solid rgba(33, 107, 73, 0.35);
+        outline-offset: 3px;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .app {
+        width: min(1540px, 100%);
+        height: 100vh;
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: 18px;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 14px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        min-width: 0;
+        padding: 2px 3px;
+      }
+
+      .brand, .header-actions, .session-line, .panel-title,
+      .run-heading, .card-heading, .composer-actions {
+        display: flex;
+        align-items: center;
+      }
+
+      .brand { gap: 11px; min-width: 0; }
+      .mark {
+        width: 40px;
+        height: 40px;
+        flex: 0 0 auto;
+        border-radius: 13px;
+        display: grid;
+        place-items: center;
+        color: white;
+        background: var(--green);
+        box-shadow: 0 9px 22px rgba(33, 107, 73, 0.22);
+        font-weight: 850;
+      }
+
+      h1 { margin: 0; font-size: 17px; letter-spacing: -0.02em; }
+      .subtitle { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+      .header-actions { gap: 8px; min-width: 0; }
+
+      .connection {
+        max-width: 290px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        border: 1px solid rgba(197, 210, 200, 0.95);
+        border-radius: 999px;
+        padding: 7px 11px;
+        color: #526057;
+        background: rgba(255, 255, 255, 0.68);
+        font-size: 11px;
+      }
+
+      .ghost, .stop, .send, .suggestion { border: 0; cursor: pointer; }
+      .ghost {
+        padding: 8px 10px;
+        border-radius: 10px;
+        color: #536158;
+        background: transparent;
+      }
+      .ghost:hover { color: var(--green); background: rgba(255, 255, 255, 0.72); }
+
+      .workspace {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(430px, 1.08fr) minmax(390px, 0.92fr);
+        gap: 14px;
+      }
+
+      .chat-panel, .inspector-panel {
+        min-width: 0;
+        min-height: 0;
+        border: 1px solid rgba(196, 209, 199, 0.9);
+        border-radius: 22px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+        overflow: hidden;
+      }
+      .chat-panel { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+      .inspector-panel {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        background: rgba(247, 250, 247, 0.94);
+      }
+
+      .panel-header {
+        min-height: 57px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .chat-panel .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .panel-title { gap: 8px; min-width: 0; }
+      .panel-title strong { font-size: 13px; }
+
+      .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #aab5ad; }
+      .live-dot.running {
+        background: #2e9a64;
+        box-shadow: 0 0 0 5px rgba(46, 154, 100, 0.12);
+        animation: live-pulse 1.5s ease-in-out infinite;
+      }
+      @keyframes live-pulse { 50% { box-shadow: 0 0 0 8px rgba(46, 154, 100, 0.02); } }
+
+      .session-line { min-width: 0; gap: 6px; color: #7a867e; font-size: 10px; }
+      .session-value {
+        max-width: 170px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #59675e;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .chat {
+        min-height: 0;
+        overflow-y: auto;
+        padding: 24px 22px 12px;
+        scroll-behavior: smooth;
+      }
+      .empty {
+        min-height: 100%;
+        display: grid;
+        place-content: center;
+        padding: 28px 10px;
+        text-align: center;
+        color: #5d6961;
+      }
+      .empty strong { color: #203529; font-size: 22px; }
+      .empty p { max-width: 500px; margin: 9px auto 20px; line-height: 1.65; font-size: 14px; }
+      .suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; }
+      .suggestion {
+        padding: 8px 12px;
+        border: 1px solid #c9d6cc;
+        border-radius: 999px;
+        color: #31513e;
+        background: #f8fbf8;
+        font-size: 12px;
+      }
+      .suggestion:hover { border-color: #68a37e; background: #edf7f0; }
+
+      .message { display: flex; flex-direction: column; margin: 0 0 19px; }
+      .message.user { align-items: flex-end; }
+      .message.assistant { align-items: flex-start; }
+      .bubble {
+        max-width: min(84%, 760px);
+        padding: 12px 15px;
+        border-radius: 17px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        line-height: 1.62;
+        font-size: 14px;
+      }
+      .user .bubble { color: white; background: var(--green); border-bottom-right-radius: 5px; }
+      .assistant .bubble {
+        min-width: 54px;
+        color: #22342a;
+        background: #f0f4f0;
+        border: 1px solid #dce5de;
+        border-bottom-left-radius: 5px;
+      }
+      .assistant.streaming .bubble:empty::before { content: "等待模型输出…"; color: #78837c; }
+      .assistant.error .bubble { color: #8e342d; border-color: #e3bab6; background: var(--red-soft); }
+      .message-meta {
+        max-width: min(88%, 780px);
+        margin-top: 6px;
+        padding: 0 4px;
+        color: #849088;
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .composer-wrap { padding: 10px 12px 12px; border-top: 1px solid rgba(210, 220, 212, 0.78); }
+      .composer {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: end;
+        padding: 8px;
+        border: 1px solid #c7d4ca;
+        border-radius: 18px;
+        background: white;
+        box-shadow: 0 10px 28px rgba(43, 75, 55, 0.08);
+      }
+      textarea {
+        width: 100%;
+        min-height: 42px;
+        max-height: 160px;
+        resize: none;
+        border: 0;
+        outline: 0;
+        padding: 10px;
+        color: #1d2d23;
+        background: transparent;
+        line-height: 1.48;
+      }
+      textarea::placeholder { color: #929b95; }
+      textarea:disabled { color: #79847d; }
+      .composer-actions { gap: 7px; }
+      .send, .stop { height: 42px; border-radius: 13px; }
+      .send {
+        width: 44px;
+        color: white;
+        background: var(--green);
+        box-shadow: 0 7px 18px rgba(33, 107, 73, 0.2);
+      }
+      .send:hover { background: var(--green-dark); }
+      .send:disabled { opacity: 0.42; cursor: not-allowed; box-shadow: none; }
+      .stop { padding: 0 13px; color: var(--red); border: 1px solid #e2b9b4; background: var(--red-soft); }
+      .stop:hover { background: #ffe6e3; }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 7px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(239, 245, 240, 0.68);
+      }
+      .metric {
+        min-width: 0;
+        padding: 8px 9px;
+        border: 1px solid #d7e1d9;
+        border-radius: 11px;
+        background: rgba(255, 255, 255, 0.76);
+      }
+      .metric-label {
+        display: block;
+        margin-bottom: 3px;
+        color: #7b877f;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      .metric-value {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #2b3d32;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .timeline { min-height: 0; overflow-y: auto; padding: 13px; }
+      .inspector-empty {
+        min-height: 100%;
+        display: grid;
+        place-content: center;
+        padding: 30px;
+        text-align: center;
+        color: #7a867e;
+        font-size: 13px;
+        line-height: 1.65;
+      }
+      .run-panel { margin: 0 0 14px; }
+      .run-heading { justify-content: space-between; gap: 12px; margin: 1px 2px 8px; }
+      .run-title { min-width: 0; color: #45544a; font-size: 11px; font-weight: 750; }
+      .run-id {
+        max-width: 190px;
+        display: inline-block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        vertical-align: bottom;
+        white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .run-budget {
+        margin: -3px 2px 8px;
+        color: #77837b;
+        font-size: 9px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+      }
+
+      .status-badge {
+        flex: 0 0 auto;
+        padding: 3px 7px;
+        border-radius: 999px;
+        color: #67736b;
+        background: #edf1ee;
+        font-size: 9px;
+        font-weight: 750;
+      }
+      .status-badge.running { color: var(--blue); background: var(--blue-soft); }
+      .status-badge.success { color: var(--green); background: var(--green-soft); }
+      .status-badge.warning { color: var(--amber); background: var(--amber-soft); }
+      .status-badge.error { color: var(--red); background: var(--red-soft); }
+
+      .event-card {
+        position: relative;
+        margin: 0 0 8px 10px;
+        padding: 11px 11px 10px;
+        border: 1px solid #d5dfd7;
+        border-radius: 13px;
+        background: rgba(255, 255, 255, 0.84);
+        box-shadow: 0 6px 16px rgba(48, 70, 55, 0.045);
+      }
+      .event-card::before {
+        content: "";
+        position: absolute;
+        left: -9px;
+        top: 14px;
+        width: 7px;
+        height: 7px;
+        border: 2px solid #f7faf7;
+        border-radius: 50%;
+        background: #9caaa0;
+      }
+      .event-card.model::before { background: #4b86a9; }
+      .event-card.tool::before { background: #7b6bac; }
+      .event-card.success::before { background: #3e9663; }
+      .event-card.warning::before { background: #d09a43; }
+      .event-card.error::before { background: #c25e55; }
+      .card-heading { justify-content: space-between; gap: 10px; }
+      .card-title {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        color: #2d4034;
+        font-size: 11px;
+        font-weight: 800;
+      }
+      .card-subtitle, .card-meta {
+        color: #7b877f;
+        font-size: 9px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+      }
+      .card-subtitle { margin-top: 3px; }
+      .card-meta { margin-top: 7px; line-height: 1.5; }
+      .field { margin-top: 9px; }
+      .field-label {
+        display: block;
+        margin: 0 0 4px;
+        color: #77837b;
+        font-size: 9px;
+        font-weight: 750;
+        letter-spacing: 0.03em;
+      }
+      pre.field-value {
+        max-height: 210px;
+        margin: 0;
+        padding: 8px 9px;
+        overflow: auto;
+        border: 1px solid #e0e6e1;
+        border-radius: 9px;
+        color: #34463a;
+        background: #f7f9f7;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10px;
+        line-height: 1.48;
+      }
+      pre.field-value:empty::before { content: "等待数据…"; color: #98a29b; }
+      .event-card.error pre.field-value { color: #873c35; background: #fff8f7; }
+      .notice-text {
+        margin: 6px 0 0;
+        color: #59675e;
+        font-size: 10px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      @media (max-width: 920px) {
+        .app { height: auto; min-height: 100vh; }
+        .workspace { grid-template-columns: 1fr; }
+        .chat-panel { min-height: 68vh; }
+        .inspector-panel { min-height: 62vh; }
+        .chat, .timeline { min-height: 390px; }
+      }
+      @media (max-width: 620px) {
+        .app { padding: 9px; gap: 9px; }
+        .topbar { padding: 1px; }
+        .subtitle, .connection { display: none; }
+        .workspace { gap: 9px; }
+        .chat-panel, .inspector-panel { border-radius: 17px; }
+        .panel-header { min-height: 52px; padding: 10px 12px; }
+        .session-value { max-width: 110px; }
+        .chat { padding: 19px 12px 8px; }
+        .bubble { max-width: 91%; }
+        .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .timeline { padding: 10px; }
+        .composer-wrap { padding: 8px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="mark" aria-hidden="true">R</div>
+          <div>
+            <h1>ReAct 调试工作台</h1>
+            <p class="subtitle">模型流 · 工具调用 · 生命周期事件</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <div id="connection" class="connection">正在连接…</div>
+          <button id="clear" class="ghost" type="button">新对话</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <section class="chat-panel" aria-label="对话">
+          <header class="panel-header">
+            <div class="panel-title">
+              <span id="live-dot" class="live-dot" aria-hidden="true"></span>
+              <strong>Conversation</strong>
+            </div>
+            <div class="session-line"><span>session</span><span id="session-value" class="session-value">未创建</span></div>
+          </header>
+
+          <div id="chat" class="chat">
+            <div id="empty" class="empty">
+              <div>
+                <strong>从一条消息开始</strong>
+                <p>左侧查看模型实时回复，右侧检查每次模型调用、工具参数、执行结果、预算和 token 用量。</p>
+                <div class="suggestions">
+                  <button class="suggestion" type="button">用三句话解释 ReAct Agent</button>
+                  <button class="suggestion" type="button">请调用工具计算 (19.9 × 7) × 0.875</button>
+                  <button class="suggestion" type="button">先计算 128 × 37，再解释计算过程</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="composer-wrap">
+            <form id="composer" class="composer">
+              <textarea id="input" rows="1" maxlength="10000" placeholder="输入消息，Enter 发送，Shift+Enter 换行" aria-label="消息"></textarea>
+              <div class="composer-actions">
+                <button id="stop" class="stop" type="button" hidden>停止</button>
+                <button id="send" class="send" type="submit" aria-label="发送">➜</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <aside class="inspector-panel" aria-label="Agent 事件检查器">
+          <header class="panel-header">
+            <div class="panel-title"><strong>Inspector</strong><span id="inspector-state" class="status-badge">idle</span></div>
+          </header>
+          <div class="summary" aria-label="运行统计">
+            <div class="metric"><span class="metric-label">Step</span><span id="metric-step" class="metric-value">0</span></div>
+            <div class="metric"><span class="metric-label">Models</span><span id="metric-models" class="metric-value">0</span></div>
+            <div class="metric"><span class="metric-label">Tools</span><span id="metric-tools" class="metric-value">0</span></div>
+            <div class="metric"><span class="metric-label">Tokens</span><span id="metric-tokens" class="metric-value">0</span></div>
+          </div>
+          <div id="timeline" class="timeline">
+            <div id="inspector-empty" class="inspector-empty">发送消息后，这里会按时间线展示 Agent 的完整可观测生命周期。</div>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <script>
+      "use strict";
+
+      const RICH_EVENT_KINDS = new Set([
+        "run_started", "model_started", "model_text_delta", "model_refusal_delta",
+        "model_tool_call_delta", "model_tool_call_ready", "model_completed", "model_failed",
+        "tool_started", "tool_result", "tool_reused", "budget_exhausted",
+        "loop_detected", "run_completed",
+      ]);
+
+      const chat = document.querySelector("#chat");
+      const empty = document.querySelector("#empty");
+      const form = document.querySelector("#composer");
+      const input = document.querySelector("#input");
+      const send = document.querySelector("#send");
+      const stop = document.querySelector("#stop");
+      const clear = document.querySelector("#clear");
+      const connection = document.querySelector("#connection");
+      const liveDot = document.querySelector("#live-dot");
+      const sessionValue = document.querySelector("#session-value");
+      const timeline = document.querySelector("#timeline");
+      const inspectorEmpty = document.querySelector("#inspector-empty");
+      const inspectorState = document.querySelector("#inspector-state");
+      const metricStep = document.querySelector("#metric-step");
+      const metricModels = document.querySelector("#metric-models");
+      const metricTools = document.querySelector("#metric-tools");
+      const metricTokens = document.querySelector("#metric-tokens");
+      const announcer = document.querySelector("#announcer");
+
+      let sessionId = null;
+      let busy = false;
+      let activeController = null;
+      let activeRequest = null;
+      let conversationVersion = 0;
+      let requestNumber = 0;
+
+      function announce(message) {
+        announcer.textContent = "";
+        window.setTimeout(() => { announcer.textContent = message; }, 0);
+      }
+      function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+      function firstDefined(...values) { return values.find((value) => value !== undefined && value !== null); }
+      function formatValue(value) {
+        if (value === undefined) return "—";
+        if (typeof value === "string") return value;
+        try {
+          const serialized = JSON.stringify(value, null, 2);
+          return serialized === undefined ? String(value) : serialized;
+        } catch (_error) { return String(value); }
+      }
+      function numberOrNull(value) {
+        if (value === undefined || value === null || value === "") return null;
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+      }
+      function shortId(value) {
+        if (value === undefined || value === null || value === "") return "pending";
+        const text = String(value);
+        return text.length > 30 ? `${text.slice(0, 13)}…${text.slice(-10)}` : text;
+      }
+      function eventData(event) { return isPlainObject(event.data) ? event.data : {}; }
+      function eventField(event, name) { return firstDefined(event[name], eventData(event)[name]); }
+      function createElement(tag, className, text) {
+        const element = document.createElement(tag);
+        if (className) element.className = className;
+        if (text !== undefined) element.textContent = String(text);
+        return element;
+      }
+      function setBadge(element, label, tone = "") {
+        element.className = `status-badge ${tone}`.trim();
+        element.textContent = label;
+      }
+      function isNearBottom(element, threshold = 120) {
+        return element.scrollHeight - element.scrollTop - element.clientHeight < threshold;
+      }
+      function scrollIfFollowing(element, wasFollowing) { if (wasFollowing) element.scrollTop = element.scrollHeight; }
+      function setSession(value) {
+        sessionId = value || null;
+        sessionValue.textContent = sessionId ? shortId(sessionId) : "未创建";
+        sessionValue.title = sessionId || "";
+      }
+      function setBusy(value) {
+        busy = value;
+        send.disabled = value;
+        input.disabled = value;
+        stop.hidden = !value;
+        liveDot.classList.toggle("running", value);
+        form.setAttribute("aria-busy", String(value));
+      }
+      function resetMetrics() {
+        metricStep.textContent = "0";
+        metricModels.textContent = "0";
+        metricTools.textContent = "0";
+        metricTokens.textContent = "0";
+        setBadge(inspectorState, "idle");
+      }
+
+      function addMessage(role, content = "", meta = "", extraClass = "") {
+        empty.hidden = true;
+        const follow = isNearBottom(chat);
+        const wrapper = createElement("article", `message ${role} ${extraClass}`.trim());
+        const bubble = createElement("div", "bubble");
+        const textNode = document.createTextNode(content);
+        bubble.appendChild(textNode);
+        wrapper.appendChild(bubble);
+        const detail = createElement("div", "message-meta", meta);
+        if (!meta) detail.hidden = true;
+        wrapper.appendChild(detail);
+        chat.appendChild(wrapper);
+        scrollIfFollowing(chat, follow);
+        return { wrapper, bubble, textNode, meta: detail };
+      }
+      function setMessageMeta(message, text) {
+        message.meta.textContent = text;
+        message.meta.hidden = !text;
+      }
+      function addField(card, label) {
+        const field = createElement("div", "field");
+        const fieldLabel = createElement("span", "field-label", label);
+        const value = createElement("pre", "field-value");
+        field.append(fieldLabel, value);
+        card.appendChild(field);
+        return { field, label: fieldLabel, value };
+      }
+      function addNotice(request, title, text, tone = "", event = null) {
+        const follow = isNearBottom(timeline);
+        const card = createElement("article", `event-card ${tone}`.trim());
+        const heading = createElement("div", "card-heading");
+        heading.appendChild(createElement("div", "card-title", title));
+        if (event) {
+          const sequence = eventField(event, "sequence");
+          if (sequence !== undefined) heading.appendChild(createElement("span", "card-subtitle", `#${sequence}`));
+        }
+        card.appendChild(heading);
+        if (text) card.appendChild(createElement("p", "notice-text", text));
+        request.eventsNode.appendChild(card);
+        scrollIfFollowing(timeline, follow);
+        return card;
+      }
+
+      function makeRequestState(assistant) {
+        inspectorEmpty.hidden = true;
+        const follow = isNearBottom(timeline);
+        const runPanel = createElement("section", "run-panel");
+        const heading = createElement("div", "run-heading");
+        const title = createElement("div", "run-title", `Run ${requestNumber} · `);
+        const runId = createElement("span", "run-id", "pending");
+        title.appendChild(runId);
+        const badge = createElement("span", "status-badge running", "connecting");
+        heading.append(title, badge);
+        const budget = createElement("div", "run-budget", "等待 run_started…");
+        const eventsNode = createElement("div", "run-events");
+        runPanel.append(heading, budget, eventsNode);
+        timeline.appendChild(runPanel);
+        scrollIfFollowing(timeline, follow);
+        return {
+          version: conversationVersion, number: requestNumber, assistant,
+          answer: "", pendingAnswer: "", rafId: 0,
+          dirtyModels: new Set(), dirtyTools: new Set(),
+          runPanel, runIdNode: runId, runBadge: badge, budgetNode: budget, eventsNode,
+          runId: null, lastSequence: null, modelCards: new Map(), toolCards: new Map(),
+          toolIdToKey: new Map(), modelCount: 0, toolCount: 0, latestStep: 0,
+          totalTokens: 0, receivedTerminal: false, gotResult: false, result: null,
+          stoppedByUser: false, protocolWarnings: new Set(),
+        };
+      }
+
+      function scheduleFlush(request) {
+        if (!request.rafId) request.rafId = window.requestAnimationFrame(() => flushPending(request));
+      }
+      function flushPending(request) {
+        request.rafId = 0;
+        if (request.version !== conversationVersion) return;
+        const followChat = isNearBottom(chat);
+        const followTimeline = isNearBottom(timeline);
+        if (request.pendingAnswer) {
+          request.assistant.textNode.appendData(request.pendingAnswer);
+          request.pendingAnswer = "";
+        }
+        request.dirtyModels.forEach((card) => {
+          card.output.value.textContent = card.outputText;
+          card.refusal.value.textContent = card.refusalText;
+          card.refusal.field.hidden = !card.refusalText;
+        });
+        request.dirtyModels.clear();
+        request.dirtyTools.forEach((card) => {
+          card.arguments.value.textContent = card.argumentsText;
+          if (card.argumentChars !== null && !card.argumentsText) {
+            card.arguments.value.textContent = `已接收 ${card.argumentChars} 个参数字符（内容受策略保护）`;
+          }
+        });
+        request.dirtyTools.clear();
+        scrollIfFollowing(chat, followChat);
+        scrollIfFollowing(timeline, followTimeline);
+      }
+      function flushNow(request) {
+        if (request.rafId) {
+          window.cancelAnimationFrame(request.rafId);
+          request.rafId = 0;
+        }
+        flushPending(request);
+      }
+      function updateMetrics(request) {
+        metricStep.textContent = String(request.latestStep || 0);
+        metricModels.textContent = String(request.modelCount || 0);
+        metricTools.textContent = String(request.toolCount || 0);
+        metricTokens.textContent = String(request.totalTokens || 0);
+      }
+      function usageTokens(usage) {
+        if (!isPlainObject(usage)) return 0;
+        return numberOrNull(firstDefined(usage.total_tokens, usage.totalTokens))
+          ?? ((numberOrNull(firstDefined(usage.input_tokens, usage.prompt_tokens)) || 0)
+            + (numberOrNull(firstDefined(usage.output_tokens, usage.completion_tokens)) || 0));
+      }
+      function formatUsage(usage) {
+        if (!isPlainObject(usage)) return "usage —";
+        const inputTokens = firstDefined(usage.input_tokens, usage.prompt_tokens);
+        const outputTokens = firstDefined(usage.output_tokens, usage.completion_tokens);
+        const totalTokens = firstDefined(usage.total_tokens, usage.totalTokens, usageTokens(usage));
+        const parts = [];
+        if (inputTokens !== undefined) parts.push(`in ${inputTokens}`);
+        if (outputTokens !== undefined) parts.push(`out ${outputTokens}`);
+        if (totalTokens !== undefined) parts.push(`total ${totalTokens}`);
+        return parts.length ? parts.join(" · ") : "usage —";
+      }
+      function summarizeBudget(data) {
+        const budget = isPlainObject(data.budget) ? data.budget : {};
+        const pairs = [];
+        const candidates = [
+          ["steps", firstDefined(data.max_steps, budget.max_steps, budget.steps)],
+          ["models", firstDefined(data.max_model_calls, budget.max_model_calls, budget.model_calls)],
+          ["tools", firstDefined(data.max_tool_calls, budget.max_tool_calls, budget.tool_calls)],
+          ["time_s", firstDefined(data.max_wall_time_s, data.timeout_seconds, budget.timeout_seconds, budget.time_seconds)],
+          ["context", firstDefined(data.max_context_chars, budget.max_context_chars)],
+          ["concurrency", firstDefined(data.max_concurrent_tools, budget.max_concurrent_tools)],
+        ];
+        candidates.forEach(([label, value]) => {
+          if (value !== undefined) pairs.push(`${label}=${typeof value === "object" ? formatValue(value).replace(/\s+/g, " ") : value}`);
+        });
+        if (!pairs.length && Object.keys(budget).length) return `budget ${formatValue(budget).replace(/\s+/g, " ")}`;
+        return pairs.length ? `budget ${pairs.join(" · ")}` : "预算信息未提供";
+      }
+      function resolveStep(event) { return numberOrNull(eventField(event, "step")) || 0; }
+      function modelKey(event) { return `${event.run_id || "run"}:step:${resolveStep(event)}`; }
+
+      function getModelCard(request, event) {
+        const key = modelKey(event);
+        let card = request.modelCards.get(key);
+        if (card) return card;
+        const follow = isNearBottom(timeline);
+        const node = createElement("article", "event-card model");
+        const heading = createElement("div", "card-heading");
+        const step = resolveStep(event);
+        const title = createElement("div", "card-title", `模型调用 · Step ${step || "?"}`);
+        const badge = createElement("span", "status-badge running", "streaming");
+        heading.append(title, badge);
+        const subtitle = createElement("div", "card-subtitle", "等待模型增量…");
+        node.append(heading, subtitle);
+        const output = addField(node, "模型输出（stream）");
+        const refusal = addField(node, "拒绝输出（stream）");
+        refusal.field.hidden = true;
+        const meta = createElement("div", "card-meta");
+        node.appendChild(meta);
+        request.eventsNode.appendChild(node);
+        card = { node, badge, subtitle, output, refusal, meta, outputText: "", refusalText: "", usage: null };
+        request.modelCards.set(key, card);
+        request.modelCount = request.modelCards.size;
+        request.latestStep = Math.max(request.latestStep, step);
+        updateMetrics(request);
+        scrollIfFollowing(timeline, follow);
+        return card;
+      }
+
+      function resolveToolKey(request, event) {
+        const data = eventData(event);
+        const callKey = firstDefined(event.call_key, data.call_key);
+        if (callKey) return String(callKey);
+        const toolCallId = firstDefined(event.tool_call_id, data.tool_call_id, data.id);
+        if (toolCallId && request.toolIdToKey.has(String(toolCallId))) return request.toolIdToKey.get(String(toolCallId));
+        const index = firstDefined(data.index, event.index, request.toolCards.size);
+        return `s${resolveStep(event)}:t${index}`;
+      }
+      function getToolCard(request, event) {
+        const data = eventData(event);
+        const key = resolveToolKey(request, event);
+        let card = request.toolCards.get(key);
+        const toolCallId = firstDefined(event.tool_call_id, data.tool_call_id, data.id);
+        if (toolCallId) request.toolIdToKey.set(String(toolCallId), key);
+        if (card) return card;
+        const follow = isNearBottom(timeline);
+        const toolName = firstDefined(event.tool_name, data.tool_name, data.name, "unknown_tool");
+        const node = createElement("article", "event-card tool");
+        const heading = createElement("div", "card-heading");
+        const title = createElement("div", "card-title", String(toolName));
+        const badge = createElement("span", "status-badge running", "arguments");
+        heading.append(title, badge);
+        const subtitle = createElement("div", "card-subtitle", `${key} · step ${resolveStep(event) || "?"}`);
+        node.append(heading, subtitle);
+        const argumentsField = addField(node, "参数（stream）");
+        const resultField = addField(node, "调用结果");
+        resultField.field.hidden = true;
+        const meta = createElement("div", "card-meta");
+        node.appendChild(meta);
+        request.eventsNode.appendChild(node);
+        card = {
+          key, node, title, badge, subtitle, arguments: argumentsField, result: resultField, meta,
+          argumentsText: "", argumentChars: null, counted: false,
+        };
+        request.toolCards.set(key, card);
+        scrollIfFollowing(timeline, follow);
+        return card;
+      }
+
+      function updateRunIdentity(request, event) {
+        const runId = firstDefined(event.run_id, eventData(event).run_id);
+        if (runId) {
+          request.runId = String(runId);
+          request.runIdNode.textContent = shortId(runId);
+          request.runIdNode.title = String(runId);
+        }
+      }
+      function checkSequence(request, event) {
+        const sequence = numberOrNull(eventField(event, "sequence"));
+        if (sequence === null) return true;
+        if (request.lastSequence !== null && sequence <= request.lastSequence) {
+          const key = `duplicate-${sequence}`;
+          if (!request.protocolWarnings.has(key)) {
+            request.protocolWarnings.add(key);
+            addNotice(request, "非单调事件", `忽略 sequence #${sequence}；上一事件为 #${request.lastSequence}。`, "warning", event);
+          }
+          return false;
+        }
+        if (request.lastSequence !== null && sequence > request.lastSequence + 1) {
+          const key = `gap-${request.lastSequence}-${sequence}`;
+          if (!request.protocolWarnings.has(key)) {
+            request.protocolWarnings.add(key);
+            addNotice(request, "事件序号缺口", `sequence 从 #${request.lastSequence} 跳到 #${sequence}。`, "warning", event);
+          }
+        }
+        request.lastSequence = sequence;
+        return true;
+      }
+      function appendAnswerDelta(request, delta) {
+        if (typeof delta !== "string" || !delta) return;
+        request.answer += delta;
+        request.pendingAnswer += delta;
+        scheduleFlush(request);
+      }
+      function errorText(data, fallback) {
+        return String(firstDefined(data.message, data.error, data.detail, data.reason, fallback));
+      }
+
+      function handleAgentEvent(request, event) {
+        if (request.version !== conversationVersion || !RICH_EVENT_KINDS.has(event.kind)) return;
+        if (!checkSequence(request, event)) return;
+        updateRunIdentity(request, event);
+        const data = eventData(event);
+        const step = resolveStep(event);
+        request.latestStep = Math.max(request.latestStep, step);
+
+        switch (event.kind) {
+          case "run_started":
+            setBadge(request.runBadge, "running", "running");
+            setBadge(inspectorState, "running", "running");
+            request.budgetNode.textContent = summarizeBudget(data);
+            break;
+          case "model_started": {
+            const card = getModelCard(request, event);
+            setBadge(card.badge, "streaming", "running");
+            const model = firstDefined(data.model, data.model_name);
+            card.subtitle.textContent = model ? `${model} · step ${step || "?"}` : `step ${step || "?"}`;
+            const details = [];
+            if (data.model_call !== undefined) details.push(`call ${data.model_call}`);
+            if (data.context_chars !== undefined) {
+              details.push(`context ${data.context_chars}/${firstDefined(data.max_context_chars, "?")}`);
+            }
+            if (data.remaining_wall_time_ms !== undefined) details.push(`remaining ${data.remaining_wall_time_ms} ms`);
+            card.meta.textContent = details.join(" · ");
+            break;
+          }
+          case "model_text_delta": {
+            const delta = firstDefined(data.delta, data.text, "");
+            appendAnswerDelta(request, delta);
+            const card = getModelCard(request, event);
+            if (typeof delta === "string") card.outputText += delta;
+            request.dirtyModels.add(card);
+            scheduleFlush(request);
+            break;
+          }
+          case "model_refusal_delta": {
+            const delta = firstDefined(data.delta, data.text, "");
+            appendAnswerDelta(request, delta);
+            const card = getModelCard(request, event);
+            if (typeof delta === "string") card.refusalText += delta;
+            request.dirtyModels.add(card);
+            scheduleFlush(request);
+            break;
+          }
+          case "model_tool_call_delta": {
+            const card = getToolCard(request, event);
+            const toolName = firstDefined(event.tool_name, data.tool_name, data.name);
+            if (toolName) card.title.textContent = String(toolName);
+            const delta = firstDefined(data.delta, data.arguments_delta);
+            if (typeof delta === "string") card.argumentsText += delta;
+            const totalChars = numberOrNull(firstDefined(data.argument_chars, data.arguments_chars));
+            const deltaChars = numberOrNull(data.delta_chars);
+            if (totalChars !== null) card.argumentChars = totalChars;
+            else if (deltaChars !== null) card.argumentChars = (card.argumentChars || 0) + deltaChars;
+            setBadge(card.badge, data.exposure === "metadata" ? "metadata" : "arguments", "running");
+            request.dirtyTools.add(card);
+            scheduleFlush(request);
+            break;
+          }
+          case "model_tool_call_ready": {
+            const card = getToolCard(request, event);
+            const toolName = firstDefined(event.tool_name, data.tool_name, data.name);
+            if (toolName) card.title.textContent = String(toolName);
+            const argumentsValue = firstDefined(data.arguments, data.metadata);
+            if (argumentsValue !== undefined) {
+              card.argumentsText = formatValue(argumentsValue);
+              card.argumentChars = null;
+              card.arguments.label.textContent = data.arguments !== undefined ? "完整参数" : "参数元数据（受策略保护）";
+              card.arguments.value.textContent = card.argumentsText;
+            } else {
+              const chars = numberOrNull(firstDefined(data.argument_chars, data.arguments_chars));
+              if (chars !== null) {
+                card.argumentChars = chars;
+                card.arguments.value.textContent = `已接收 ${chars} 个参数字符（内容受策略保护）`;
+              }
+            }
+            const toolCallId = firstDefined(event.tool_call_id, data.tool_call_id, data.id);
+            const readyMeta = [];
+            if (toolCallId) readyMeta.push(`tool_call_id ${toolCallId}`);
+            if (data.truncated === true) readyMeta.push("truncated");
+            if (data.exposure) readyMeta.push(`exposure ${data.exposure}`);
+            card.meta.textContent = readyMeta.join(" · ") || "参数已完整接收，等待执行";
+            setBadge(card.badge, "ready", "running");
+            break;
+          }
+          case "model_completed": {
+            const card = getModelCard(request, event);
+            const usage = isPlainObject(data.usage) ? data.usage : null;
+            card.usage = usage;
+            request.totalTokens = Array.from(request.modelCards.values()).reduce((total, item) => total + usageTokens(item.usage), 0);
+            const duration = firstDefined(data.duration_ms, data.duration);
+            const outcome = firstDefined(data.outcome, data.finish_reason, data.status, "completed");
+            card.meta.textContent = `${formatUsage(usage)}${duration !== undefined ? ` · ${duration}${data.duration_ms !== undefined ? " ms" : ""}` : ""}`;
+            if (!card.outputText) {
+              const outputChars = numberOrNull(data.output_chars);
+              card.output.value.textContent = outputChars
+                ? `未收到文本增量；最终响应包含 ${outputChars} 个输出字符。`
+                : "本轮模型未产生文本输出。";
+            }
+            setBadge(card.badge, String(outcome), "success");
+            card.node.classList.add("success");
+            break;
+          }
+          case "model_failed": {
+            const card = getModelCard(request, event);
+            const message = errorText(data, "模型调用失败");
+            const details = [message];
+            if (data.error_type !== undefined) details.push(`type ${data.error_type}`);
+            if (data.request_id !== undefined && data.request_id !== null) details.push(`request ${data.request_id}`);
+            if (data.duration_ms !== undefined) details.push(`duration ${data.duration_ms} ms`);
+            card.meta.textContent = details.join(" · ");
+            setBadge(card.badge, "failed", "error");
+            card.node.classList.add("error");
+            if (!request.answer) {
+              request.assistant.wrapper.classList.add("error");
+              request.assistant.textNode.data = message;
+            }
+            break;
+          }
+          case "tool_started": {
+            const card = getToolCard(request, event);
+            if (!card.counted) { card.counted = true; request.toolCount += 1; }
+            const toolName = firstDefined(event.tool_name, data.tool_name, data.name);
+            if (toolName) card.title.textContent = String(toolName);
+            setBadge(card.badge, "running", "running");
+            const argumentChars = numberOrNull(data.argument_chars);
+            if (argumentChars !== null && !card.argumentsText) {
+              card.argumentChars = argumentChars;
+              request.dirtyTools.add(card);
+              scheduleFlush(request);
+            }
+            card.meta.textContent = data.exposure ? `工具执行中 · exposure ${data.exposure}` : "工具执行中…";
+            break;
+          }
+          case "tool_result": {
+            const card = getToolCard(request, event);
+            if (!card.counted) { card.counted = true; request.toolCount += 1; }
+            const isError = Boolean(firstDefined(data.is_error, event.is_error, data.status === "error", false));
+            const resultValue = firstDefined(data.result, data.metadata);
+            card.result.field.hidden = false;
+            card.result.label.textContent = data.result !== undefined ? "调用结果" : "结果元数据（受策略保护）";
+            if (resultValue !== undefined) {
+              card.result.value.textContent = formatValue(resultValue);
+            } else {
+              const chars = firstDefined(data.result_chars, data.output_chars);
+              card.result.value.textContent = chars !== undefined ? `结果共 ${chars} 个字符（内容受策略保护）` : "结果内容受策略保护";
+            }
+            const duration = firstDefined(data.duration_ms, data.duration);
+            const meta = [];
+            if (data.status !== undefined) meta.push(`status ${data.status}`);
+            if (duration !== undefined) meta.push(`duration ${duration}${data.duration_ms !== undefined ? " ms" : ""}`);
+            if (data.truncated === true) meta.push("truncated");
+            if (data.exposure) meta.push(`exposure ${data.exposure}`);
+            card.meta.textContent = meta.join(" · ") || "工具已返回";
+            setBadge(card.badge, isError ? "error" : "completed", isError ? "error" : "success");
+            card.node.classList.add(isError ? "error" : "success");
+            break;
+          }
+          case "tool_reused": {
+            const card = getToolCard(request, event);
+            if (!card.counted) { card.counted = true; request.toolCount += 1; }
+            const resultValue = firstDefined(data.result, data.metadata);
+            if (resultValue !== undefined || data.result_chars !== undefined) {
+              card.result.field.hidden = false;
+              card.result.value.textContent = resultValue !== undefined
+                ? formatValue(resultValue)
+                : `结果共 ${data.result_chars} 个字符（内容受策略保护）`;
+            }
+            const meta = ["复用已有工具结果，未再次执行"];
+            if (data.status !== undefined) meta.push(`status ${data.status}`);
+            if (data.duration_ms !== undefined) meta.push(`duration ${data.duration_ms} ms`);
+            if (data.exposure) meta.push(`exposure ${data.exposure}`);
+            card.meta.textContent = meta.join(" · ");
+            setBadge(card.badge, "reused", "warning");
+            card.node.classList.add("warning");
+            break;
+          }
+          case "budget_exhausted": {
+            const reason = firstDefined(data.reason, "unknown");
+            const message = `reason ${reason}${data.context_chars !== undefined ? ` · context ${data.context_chars}` : ""}`;
+            addNotice(request, "预算耗尽", message, "warning", event);
+            setBadge(request.runBadge, "budget exhausted", "warning");
+            setBadge(inspectorState, "budget", "warning");
+            break;
+          }
+          case "loop_detected": {
+            const repeatCount = firstDefined(data.repeat_count, "?");
+            const repeatLimit = firstDefined(data.repeat_limit, "?");
+            const message = `重复动作 ${repeatCount}/${repeatLimit}`;
+            addNotice(request, "循环检测", message, "warning", event);
+            setBadge(request.runBadge, "loop detected", "warning");
+            setBadge(inspectorState, "loop", "warning");
+            break;
+          }
+          case "run_completed": {
+            const outcome = firstDefined(data.outcome, data.status, data.stop_reason, "completed");
+            const isSuccess = outcome === "completed" || outcome === "success" || outcome === "final_answer";
+            const duration = firstDefined(data.elapsed_ms, data.duration_ms, data.duration);
+            const details = [];
+            if (data.stop_reason !== undefined) details.push(`stop_reason ${data.stop_reason}`);
+            if (data.model_calls !== undefined) {
+              request.modelCount = numberOrNull(data.model_calls) ?? request.modelCount;
+              details.push(`models ${data.model_calls}`);
+            }
+            if (data.tool_calls !== undefined) {
+              request.toolCount = numberOrNull(data.tool_calls) ?? request.toolCount;
+              details.push(`tools ${data.tool_calls}`);
+            }
+            if (isPlainObject(data.usage)) request.totalTokens = usageTokens(data.usage);
+            if (duration !== undefined) details.push(`duration ${duration}${data.elapsed_ms !== undefined || data.duration_ms !== undefined ? " ms" : ""}`);
+            addNotice(request, "Agent 运行结束", details.join(" · ") || String(outcome), isSuccess ? "success" : "warning", event);
+            setBadge(request.runBadge, String(outcome), isSuccess ? "success" : "warning");
+            setBadge(inspectorState, String(outcome), isSuccess ? "success" : "warning");
+            break;
+          }
+          default:
+            break;
+        }
+        updateMetrics(request);
+      }
+
+      function normalizeAgentEvent(eventName, payload) {
+        if (!isPlainObject(payload)) return null;
+        if (eventName === "agent_event" || eventName === "message") {
+          return typeof payload.kind === "string" ? payload : null;
+        }
+        if (!RICH_EVENT_KINDS.has(eventName)) return null;
+        return { ...payload, kind: eventName, data: payload.data !== undefined ? payload.data : payload };
+      }
+      function applyAuthoritativeAnswer(request, answer) {
+        if (typeof answer !== "string" || !answer) return;
+        flushNow(request);
+        request.answer = answer;
+        request.pendingAnswer = "";
+        request.assistant.textNode.data = answer;
+      }
+      function resultSummary(data) {
+        const usage = isPlainObject(data.usage) ? data.usage : {};
+        const parts = [];
+        if (data.model_calls !== undefined) parts.push(`${data.model_calls} 次模型调用`);
+        if (data.tool_calls !== undefined) parts.push(`${data.tool_calls} 次工具调用`);
+        if (usageTokens(usage)) parts.push(`${usageTokens(usage)} tokens`);
+        if (data.committed === false || (data.committed === undefined && data.status && data.status !== "completed")) parts.push("本轮未写入上下文（未提交到会话）");
+        else if (data.committed === true) parts.push("已提交到会话");
+        if (data.side_effects_possible === true) parts.push("可能已产生工具副作用");
+        return parts.join(" · ");
+      }
+      function handleResult(request, payload) {
+        if (!isPlainObject(payload)) return;
+        const data = isPlainObject(payload.result) ? payload.result : payload;
+        request.gotResult = true;
+        request.result = data;
+        if (typeof data.session_id === "string") setSession(data.session_id);
+        applyAuthoritativeAnswer(request, data.answer);
+        const usage = isPlainObject(data.usage) ? data.usage : null;
+        const total = usageTokens(usage);
+        if (total) request.totalTokens = total;
+        const modelCalls = numberOrNull(data.model_calls);
+        const toolCalls = numberOrNull(data.tool_calls);
+        if (modelCalls !== null) request.modelCount = modelCalls;
+        if (toolCalls !== null) request.toolCount = toolCalls;
+        updateMetrics(request);
+        const summary = resultSummary(data);
+        setMessageMeta(request.assistant, summary);
+        const committed = firstDefined(data.committed, data.status === "completed");
+        if (!data.answer && data.error) {
+          request.assistant.wrapper.classList.add("error");
+          request.assistant.textNode.data = String(data.error);
+        }
+        if (committed === false || data.side_effects_possible === true) {
+          addNotice(request, committed === false ? "结果未提交" : "副作用提示", summary || "本轮状态需要人工确认。", "warning");
+        }
+      }
+      function handleStreamError(request, payload) {
+        const data = isPlainObject(payload) ? payload : {};
+        const message = errorText(data, typeof payload === "string" ? payload : "流式请求失败");
+        request.receivedTerminal = true;
+        request.assistant.wrapper.classList.remove("streaming");
+        if (!request.answer) {
+          request.assistant.wrapper.classList.add("error");
+          request.assistant.textNode.data = message;
+        }
+        setMessageMeta(request.assistant, `stream_error · ${message}`);
+        addNotice(request, "Stream error", message, "error");
+        setBadge(request.runBadge, "stream error", "error");
+        setBadge(inspectorState, "error", "error");
+        announce(`请求失败：${message}`);
+      }
+      function handleDone(request, payload) {
+        if (isPlainObject(payload) && (
+          payload.answer !== undefined || payload.result !== undefined
+          || payload.model_calls !== undefined || payload.session_id !== undefined
+        )) handleResult(request, payload);
+        request.receivedTerminal = true;
+        request.assistant.wrapper.classList.remove("streaming");
+        if (!request.answer && !request.assistant.textNode.data) request.assistant.textNode.data = "本轮没有返回可显示的文本。";
+        if (!request.result) setMessageMeta(request.assistant, "stream completed");
+        if (!request.runBadge.classList.contains("error") && !request.runBadge.classList.contains("warning")) {
+          setBadge(request.runBadge, "completed", "success");
+          setBadge(inspectorState, "completed", "success");
+        }
+        announce("Agent 已完成回复");
+      }
+
+      function handleSseEvent(request, eventName, payload, rawData) {
+        if (request.version !== conversationVersion) return;
+        const rich = normalizeAgentEvent(eventName, payload);
+        if (rich) { handleAgentEvent(request, rich); return; }
+        if (eventName === "session") {
+          const data = isPlainObject(payload) ? payload : {};
+          const nextSessionId = firstDefined(data.session_id, isPlainObject(data.data) ? data.data.session_id : undefined);
+          if (typeof nextSessionId === "string") setSession(nextSessionId);
+          return;
+        }
+        if (eventName === "result") { handleResult(request, payload); return; }
+        if (eventName === "stream_error") { handleStreamError(request, payload); return; }
+        if (eventName === "done" || rawData === "[DONE]") { handleDone(request, payload); }
+      }
+
+      function parseEventBlock(block, request) {
+        if (!block) return;
+        let eventName = "message";
+        const dataLines = [];
+        const lines = block.split(/\r\n|\n|\r/);
+        for (const line of lines) {
+          if (!line || line.startsWith(":")) continue;
+          const colon = line.indexOf(":");
+          const field = colon === -1 ? line : line.slice(0, colon);
+          let value = colon === -1 ? "" : line.slice(colon + 1);
+          if (value.startsWith(" ")) value = value.slice(1);
+          if (field === "event") eventName = value || "message";
+          if (field === "data") dataLines.push(value);
+        }
+        if (!dataLines.length) return;
+        const rawData = dataLines.join("\n");
+        let payload = rawData;
+        if (rawData === "[DONE]") payload = {};
+        else {
+          try { payload = JSON.parse(rawData); } catch (_error) { /* plain text is valid SSE data */ }
+        }
+        handleSseEvent(request, eventName, payload, rawData);
+      }
+
+      async function consumeSse(response, request, signal) {
+        if (!response.body) throw new Error("浏览器未提供可读取的响应流");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+            buffer += decoder.decode(value, { stream: true });
+            while (true) {
+              const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/.exec(buffer);
+              if (!match) break;
+              const block = buffer.slice(0, match.index);
+              buffer = buffer.slice(match.index + match[0].length);
+              parseEventBlock(block, request);
+            }
+          }
+          buffer += decoder.decode();
+          if (buffer.trim()) parseEventBlock(buffer, request);
+        } finally { reader.releaseLock(); }
+      }
+      async function readHttpError(response) {
+        const raw = await response.text().catch(() => "");
+        if (!raw) return `请求失败（HTTP ${response.status}）`;
+        try {
+          const data = JSON.parse(raw);
+          return String(firstDefined(data.detail, data.error, data.message, `请求失败（HTTP ${response.status}）`));
+        } catch (_error) { return raw.slice(0, 500); }
+      }
+      function markDisconnected(request, detail = "") {
+        flushNow(request);
+        request.assistant.wrapper.classList.remove("streaming");
+        const message = "连接在 terminal 事件前关闭；最终状态未知，未自动重试。";
+        if (!request.answer) {
+          request.assistant.wrapper.classList.add("error");
+          request.assistant.textNode.data = message;
+        }
+        setMessageMeta(request.assistant, `disconnected_unknown${detail ? ` · ${detail}` : ""}`);
+        addNotice(request, "Disconnected unknown", `${message}${detail ? `\n${detail}` : ""}`, "warning");
+        setBadge(request.runBadge, "unknown", "warning");
+        setBadge(inspectorState, "unknown", "warning");
+        announce("连接中断，Agent 最终状态未知");
+      }
+      function markStopped(request) {
+        flushNow(request);
+        request.assistant.wrapper.classList.remove("streaming");
+        if (!request.answer) request.assistant.textNode.data = "已停止接收本轮输出。";
+        setMessageMeta(request.assistant, "用户已停止 · 会话已保留 · 工具副作用状态未知");
+        addNotice(request, "Stopped by user", "客户端已中止流。不会自动重试；服务端工具调用可能已经发生。", "warning");
+        setBadge(request.runBadge, "stopped", "warning");
+        setBadge(inspectorState, "stopped", "warning");
+        announce("已停止接收，当前会话已保留");
+      }
+
+      async function submitMessage(message) {
+        const text = message.trim();
+        if (!text || busy) return;
+        addMessage("user", text);
+        input.value = "";
+        input.style.height = "auto";
+        requestNumber += 1;
+        const assistant = addMessage("assistant", "", "", "streaming");
+        const request = makeRequestState(assistant);
+        const requestVersion = conversationVersion;
+        const controller = new AbortController();
+        activeController = controller;
+        activeRequest = request;
+        setBusy(true);
+        setBadge(inspectorState, "connecting", "running");
+        let transportError = null;
+        try {
+          const response = await fetch("/api/chat/stream", {
+            method: "POST",
+            headers: { "Accept": "text/event-stream", "Content-Type": "application/json" },
+            body: JSON.stringify({ message: text, session_id: sessionId }),
+            signal: controller.signal,
+          });
+          if (requestVersion !== conversationVersion) return;
+          if (!response.ok) {
+            const detail = await readHttpError(response);
+            if (response.status === 404 && sessionId) {
+              setSession(null);
+              handleStreamError(request, { message: `会话已失效，已切换为新会话；${detail}` });
+              return;
+            }
+            handleStreamError(request, { message: `${detail}（HTTP ${response.status}）` });
+            return;
+          }
+          await consumeSse(response, request, controller.signal);
+        } catch (error) {
+          if (requestVersion !== conversationVersion) return;
+          if (controller.signal.aborted && request.stoppedByUser) markStopped(request);
+          else if (controller.signal.aborted) transportError = "请求已中止";
+          else transportError = error instanceof Error ? error.message : "网络错误";
+        } finally {
+          if (requestVersion !== conversationVersion) return;
+          flushNow(request);
+          if (!request.receivedTerminal && !request.stoppedByUser) markDisconnected(request, transportError || "");
+          if (activeController === controller) activeController = null;
+          if (activeRequest === request) activeRequest = null;
+          setBusy(false);
+          input.focus();
+        }
+      }
+
+      function resetConversationView() {
+        setSession(null);
+        chat.querySelectorAll(".message").forEach((node) => node.remove());
+        timeline.querySelectorAll(".run-panel").forEach((node) => node.remove());
+        empty.hidden = false;
+        inspectorEmpty.hidden = false;
+        input.value = "";
+        input.style.height = "auto";
+        requestNumber = 0;
+        resetMetrics();
+      }
+
+      form.addEventListener("submit", (event) => { event.preventDefault(); void submitMessage(input.value); });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitMessage(input.value); }
+      });
+      input.addEventListener("input", () => {
+        input.style.height = "auto";
+        input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+      });
+      document.querySelectorAll(".suggestion").forEach((button) => {
+        button.addEventListener("click", () => void submitMessage(button.textContent || ""));
+      });
+      stop.addEventListener("click", () => {
+        if (!activeController || !activeRequest) return;
+        activeRequest.stoppedByUser = true;
+        activeController.abort();
+      });
+      clear.addEventListener("click", () => {
+        const oldSessionId = sessionId;
+        conversationVersion += 1;
+        if (activeRequest?.rafId) window.cancelAnimationFrame(activeRequest.rafId);
+        activeController?.abort();
+        activeController = null;
+        activeRequest = null;
+        resetConversationView();
+        setBusy(false);
+        input.focus();
+        if (oldSessionId) void fetch(`/api/sessions/${encodeURIComponent(oldSessionId)}`, { method: "DELETE" }).catch(() => {});
+      });
+
+      fetch("/api/health")
+        .then((response) => {
+          if (!response.ok) throw new Error("未配置");
+          return response.json();
+        })
+        .then((data) => { connection.textContent = `${data.model || "model"} · ${data.api_mode || "API"}`; })
+        .catch(() => { connection.textContent = "Agent 未连接"; connection.style.color = "#9a3d35"; });
+
+      input.focus();
+    </script>
+  </body>
+</html>
