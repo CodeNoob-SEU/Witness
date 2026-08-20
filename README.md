@@ -1,6 +1,72 @@
-# react-agent-core
+<p align="center">
+  <img src="docs/assets/witness-logo.png" width="180" alt="Witness Logo">
+</p>
 
-一个小而明确、面向生产约束的 Python ReAct Agent 核心。它使用 OpenAI 风格的结构化 function/tool calling，不解析脆弱的 `Thought / Action / Observation` 文本，也不会要求模型公开或保存私有思维链。
+<h1 align="center">Witness</h1>
+
+<p align="center">
+  <strong>可观测、可追溯、可恢复的 ReAct Agent Runtime</strong>
+</p>
+
+<p align="center">
+  PostgreSQL Event Sourcing · Session Resume · Trace Replay · Git Worktree · OpenTelemetry
+</p>
+
+## 项目目标
+
+Witness 面向需要长时间运行、会调用工具并可能修改代码仓库的 Agent 任务。它不只实现一层
+ReAct 循环，还提供一套可审计的执行底座：把已经提交的事件作为唯一事实源，让运行状态能够
+重建、任务能够恢复、历史轨迹能够回放，并把可观测性与任务正确性解耦。
+
+> 自研可观测、可追溯 Agent Runtime：自研事件溯源 Agent Runtime，以追加式事件日志统一记录模型决策、工具调用与执行结果，运行状态均可从日志重建；打通 Session Resume、模型/工具轨迹 Replay 与 Trace/成本统计，使仓库级长任务在进程中断后可续跑、历史执行可复现、问题链路可审计。
+
+项目遵循三个核心原则：
+
+1. **先记录意图，再执行副作用**：模型调用和工具执行都有明确的 durable 提交边界。
+2. **日志是事实，Snapshot 是缓存**：删除 Snapshot 后仍可从 sequence 1 精确重建运行状态。
+3. **可观测性不参与正确性**：OpenTelemetry 只消费已提交事件的安全投影，采样或导出失败不影响任务执行与恢复。
+
+## 当前实现情况
+
+当前主线已经具备可运行的事件溯源 Runtime、调试工作台和本地可观测栈，而不是只有接口设计。
+
+| 能力 | 状态 | 当前实现 |
+| --- | --- | --- |
+| ReAct Core | ✅ 已实现 | OpenAI Responses / Chat Completions、严格 tool schema、并发与预算限制 |
+| 事件溯源 | ✅ 已实现 | 版本化事件、纯 reducer、upcaster、严格 sequence、前向 hash chain |
+| PostgreSQL Journal | ✅ 已实现 | PostgreSQL 16+、CAS、幂等 operation、租约、fencing、Session 单活 Run |
+| Session Resume | ✅ 已实现 | 新 execution 恢复、模型 abandoned、工具恢复策略、人工 reconciliation |
+| Live / Replay | ✅ 已实现 | durable SSE、实时模型 delta、Timeline、Audit、只读 Replay、安全 Fork |
+| 仓库级任务 | ✅ 已实现 | Session 隔离 Git worktree、前后 checkpoint、diff 摘要与偏离检测 |
+| Token / 成本 | ✅ 已实现 | usage 明细、冻结成本记录、独立追加式成本调整账本、Session 汇总 |
+| OpenTelemetry | ✅ 已实现 | Agent / model / tool span、Resume Span Link、GenAI metrics、隐私投影 |
+| 前端工作台 | ✅ 已实现 | Live、Timeline、Audit、Replay、Workspace Diff、Cost、History |
+| 跨主机搬迁 worktree | ◻️ 暂未覆盖 | 当前支持同机多进程或共享 Git 存储；跨主机工作区迁移留待后续阶段 |
+
+当前验证基线：`220 passed, 18 skipped`，另有 `18 passed` 的真实 PostgreSQL 集成测试；Ruff、
+Mypy 和 wheel 构建均通过，发布包内包含 `001–010` 数据库 migration。
+
+## 架构概览
+
+```mermaid
+flowchart LR
+    A["Agent Runtime"] -->|"先记录意图，再执行副作用"| J[("PostgreSQL Event Journal")]
+    J --> R["Pure Reducer / Snapshot"]
+    R --> S["Session / Resume"]
+    J --> F["SSE Live / Replay"]
+    J --> C["Usage / Cost Ledger"]
+    J -. "安全公共投影" .-> O["OpenTelemetry"]
+    R --> W["Git Worktree Checkpoint"]
+```
+
+PostgreSQL 追加日志是生产模式下的唯一事实源；Snapshot 可以删除并重建，`LISTEN/NOTIFY`
+只负责唤醒 follower。Replay 只 fold 历史事件，不调用模型、工具或修改 Session。
+
+## ReAct Core
+
+底层是一个小而明确、面向生产约束的 Python ReAct Agent 核心。它使用 OpenAI 风格的结构化
+function/tool calling，不解析脆弱的 `Thought / Action / Observation` 文本，也不会要求模型公开
+或保存私有思维链。
 
 框架把一次运行建模为有限循环：
 
@@ -15,7 +81,7 @@
 
 每个 assistant tool call 都会得到且只得到一个匹配 ID 的 tool result；未知工具、参数错误、审批拒绝、超时和工具异常也会转换成结构化 observation，而不是破坏消息协议。
 
-## 特性
+### 核心能力
 
 - 默认使用 OpenAI Responses API；可切换到 Chat Completions，兼容只实现 `/v1/chat/completions` 的服务。
 - 使用 Pydantic 从带类型注解的 Python 函数生成严格 JSON Schema，并在本地再次校验模型参数。
