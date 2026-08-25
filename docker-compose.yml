@@ -1,0 +1,107 @@
+name: witness
+
+# One command brings up PostgreSQL, applies migrations as a separate job, and
+# starts the workbench:
+#
+#     OPENAI_API_KEY=... OPENAI_MODEL=... docker compose up
+#
+# The crash-recovery demo needs no credentials, because it drives a scripted
+# model:
+#
+#     docker compose run --rm demo
+#
+# Credentials use `:-` rather than `:?` on purpose: a missing key must not stop
+# `docker compose run demo` from working, and the app already fails with a
+# clear message of its own.
+
+x-runtime: &runtime
+  build:
+    context: .
+    args:
+      # Point this at a mirror when the default registry is unreachable.
+      PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+  environment: &runtime-env
+    REACT_AGENT_POSTGRES_DSN: postgresql://witness:witness@postgres:5432/witness
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: witness
+      POSTGRES_PASSWORD: witness
+      POSTGRES_DB: witness
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U witness -d witness"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    # Deliberately not published: only compose services need to reach it.
+    # Uncomment to inspect the journal from the host.
+    # ports: ["127.0.0.1:55432:5432"]
+
+  migrate:
+    <<: *runtime
+    command: ["react-agent-migrate"]
+    restart: "no"
+
+  app:
+    <<: *runtime
+    environment:
+      <<: *runtime-env
+      REACT_AGENT_WEB_HOST: 0.0.0.0
+      REACT_AGENT_WEB_PORT: "8000"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_MODE: ${OPENAI_API_MODE:-responses}
+      OPENAI_COMPAT_MODE: ${OPENAI_COMPAT_MODE:-false}
+      # Enable the isolated Git worktree and its read/write tools.
+      REACT_AGENT_REPOSITORY: /workspaces/repo
+      REACT_AGENT_WORKTREE_ROOT: /workspaces/managed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # The workspace adapter needs a real repository to branch worktrees from.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -d /workspaces/repo/.git ]; then
+          mkdir -p /workspaces/repo
+          cd /workspaces/repo
+          git init --quiet
+          printf 'demo workspace\n' > README.md
+          printf '1.0.0\n' > version.txt
+          git add -A && git commit --quiet -m 'demo baseline'
+        fi
+        exec react-agent-web
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',
+          timeout=3).status==200 else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Credential-free proof that a run survives SIGKILL mid-tool-call.
+  demo:
+    <<: *runtime
+    command: ["python", "examples/chaos_resume.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["demo"]
+    restart: "no"

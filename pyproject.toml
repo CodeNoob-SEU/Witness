@@ -36,6 +36,7 @@ otel = [
 
 [project.scripts]
 react-agent = "react_agent.cli:main"
+react-agent-migrate = "react_agent.migrate:main"
 react-agent-web = "react_agent.web:main"
 
 [tool.hatch.build.targets.wheel]
