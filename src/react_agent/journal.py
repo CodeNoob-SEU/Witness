@@ -17,6 +17,7 @@ from .events import (
     RunSnapshot,
     StoredRunEvent,
     fold_events,
+    fold_events_from,
 )
 
 
@@ -329,8 +330,15 @@ class InMemoryRunJournal:
                 agent_revision=agent_revision,
                 tool_manifest_hash=tool_manifest_hash,
             )
-            candidate_events = (*log.events, event)
-            snapshot = fold_events(candidate_events)
+            # Folding the whole log on every append is O(n) per event and
+            # O(n^2) per run. The cached snapshot is reducer state this adapter
+            # produced from an already-verified chain, so continuing from it is
+            # equivalent -- the new event's hash link is still checked.
+            snapshot = (
+                fold_events_from(log.snapshot, (event,))
+                if log.snapshot is not None
+                else fold_events((*log.events, event))
+            )
             log.events.append(event)
             log.operations[operation_id] = _CommittedOperation(
                 payload_hash=payload_hash,
@@ -418,7 +426,11 @@ class InMemoryRunJournal:
                 new_events.append(event)
                 previous = event
 
-            snapshot = fold_events(tuple(candidate_events))
+            snapshot = (
+                fold_events_from(log.snapshot, tuple(new_events))
+                if log.snapshot is not None
+                else fold_events(tuple(candidate_events))
+            )
             log.events.extend(new_events)
             for event, payload_hash in zip(new_events, payload_hashes, strict=True):
                 log.operations[event.operation_id] = _CommittedOperation(
