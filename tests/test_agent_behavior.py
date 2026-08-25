@@ -721,3 +721,55 @@ async def test_stream_sink_cancellation_propagates_before_model_invocation() -> 
         await ReActAgent(model).run("取消", stream_sink=cancel_on_model_start)
 
     assert model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_run_deadline_keeps_results_of_tools_that_already_finished() -> None:
+    started = asyncio.Event()
+
+    @tool(parallel_safe=True, idempotent=True, timeout_s=None)
+    async def quick_lookup(sku: str) -> dict[str, str]:
+        """Return a local record immediately."""
+
+        started.set()
+        return {"sku": sku, "status": "reserved"}
+
+    @tool(parallel_safe=True, idempotent=True, timeout_s=None)
+    async def slow_lookup(sku: str) -> dict[str, str]:
+        """Block past the run deadline."""
+
+        await asyncio.sleep(30)
+        raise AssertionError("unreachable")
+
+    model = ScriptedModel(
+        ModelResponse(
+            AssistantMessage(
+                tool_calls=(
+                    ToolCall("call-quick", "quick_lookup", '{"sku":"a"}'),
+                    ToolCall("call-slow", "slow_lookup", '{"sku":"b"}'),
+                )
+            )
+        )
+    )
+    agent = ReActAgent(
+        model,
+        [quick_lookup, slow_lookup],
+        config=AgentConfig(max_wall_time_s=0.3, parallel_tool_calls=True),
+    )
+
+    result = await agent.run("look both up")
+
+    assert result.status is RunStatus.TIMED_OUT
+    assert result.stop_reason is StopReason.WALL_TIME
+    observations = [item for item in result.transcript if isinstance(item, ToolMessage)]
+    assert [item.call_id for item in observations] == ["call-quick", "call-slow"]
+    quick, slow = observations
+
+    # The quick call really executed, so its durable observation must survive.
+    # Rewriting it as a timeout would invite a Fork to repeat the side effect.
+    assert quick.is_error is False
+    assert json.loads(quick.content)["data"] == {"sku": "a", "status": "reserved"}
+    assert result.tool_executions == 1
+
+    assert slow.is_error is True
+    assert json.loads(slow.content)["error"]["code"] == "RUN_TIMEOUT"

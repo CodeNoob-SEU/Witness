@@ -815,7 +815,23 @@ async def test_otel_async_lifecycle_uses_explicit_parent_without_cross_task_deta
     assert context_module.cross_task_detaches == []
 
 
-def test_resume_starts_new_root_with_link_and_bounded_recovery_metric() -> None:
+def test_resume_starts_new_root_with_link_and_bounded_recovery_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace_module = FakeTraceModule()
+    context_module = FakeContextModule()
+
+    def fake_import(name: str) -> Any:
+        if name == "opentelemetry.trace":
+            return trace_module
+        if name == "opentelemetry.context":
+            return context_module
+        raise ImportError(name)
+
+    # Inject the trace/context seams instead of importing the real ones. The
+    # OpenTelemetry SDK is an optional extra, so a test that reaches for the
+    # ambient install passes or fails depending on how the venv was synced.
+    monkeypatch.setattr("react_agent.telemetry.importlib.import_module", fake_import)
     tracer = FakeTracer()
     meter = FakeMeter()
     adapter = OTelTelemetry(tracer=tracer, meter=meter, logger=FakeLogger())
