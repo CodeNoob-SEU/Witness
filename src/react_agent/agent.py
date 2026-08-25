@@ -1255,8 +1255,11 @@ class ReActAgent:
             except TimeoutError:
                 # Pair every requested call before returning. Some sync functions running in
                 # threads may outlive cancellation; high-risk tools belong in killable workers.
-                observations = [
-                    ToolMessage(
+                # A call that already finished keeps its real observation: the journal has
+                # committed tool.completed for it, and overwriting that with a timeout would
+                # let a later Fork replay an effect this run had already performed.
+                def timed_out(call: ToolCall) -> ToolMessage:
+                    return ToolMessage(
                         call_id=call.id,
                         name=call.name,
                         content=json.dumps(
@@ -1272,9 +1275,16 @@ class ReActAgent:
                         ),
                         is_error=True,
                     )
-                    for call in message.tool_calls
-                ]
+
+                observations = []
+                for call in message.tool_calls:
+                    finished = executed.get(call.id)
+                    if finished is not None and finished[0] == tool_action_fingerprint(call):
+                        observations.append(finished[1])
+                    else:
+                        observations.append(timed_out(call))
                 transcript.extend(observations)
+
                 await record(
                     AgentJournalEventKind.BUDGET_EXHAUSTED,
                     f"budget:s{step}:wall_time",

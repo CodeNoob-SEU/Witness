@@ -1219,9 +1219,12 @@ class AgentRuntime:
         workspace: WorkspaceCheckpointStore | None = None,
         worker_id: str | None = None,
         lease_ttl_s: float = 30.0,
+        max_retained_runs: int = 256,
     ) -> None:
         if lease_ttl_s <= 0:
             raise ValueError("lease_ttl_s must be positive")
+        if max_retained_runs < 1:
+            raise ValueError("max_retained_runs must be positive")
         self.agent = agent
         self.journal = journal
         if store is not None:
@@ -1252,6 +1255,7 @@ class AgentRuntime:
         self.workspace = workspace
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex}"
         self.lease_ttl_s = lease_ttl_s
+        self.max_retained_runs = max_retained_runs
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._writers: dict[str, _JournalWriter] = {}
         self._buses: dict[str, _LiveBus] = {}
@@ -1260,7 +1264,53 @@ class AgentRuntime:
         self._workspace_paths: dict[str, Path] = {}
         self._coordination_lock = asyncio.Lock()
 
+    def _is_run_idle(self, run_id: str) -> bool:
+        task = self._tasks.get(run_id)
+        return task is None or task.done()
+
+    def _forget_finished_runs(self) -> None:
+        """Bound disposable process-local coordination state.
+
+        The journal is the source of truth; live buses, in-process results and
+        task errors are caches. A long-lived web process would otherwise retain
+        one bus (up to ``_LiveBus._max_events`` deltas), one full transcript and
+        one traceback for every run it has ever executed.
+
+        Only runs with no live execution are evicted. Producers and followers
+        resolve their bus once and keep that reference, so dropping the entry
+        cannot split an in-flight pair; a follower attaching later gets a fresh
+        bus, which is correct because live deltas are never replayable.
+        """
+
+        active_sessions = {
+            writer.session_id
+            for run_id, writer in self._writers.items()
+            if not self._is_run_idle(run_id)
+        }
+        for cache in (self._buses, self._results, self._task_errors):
+            while len(cache) > self.max_retained_runs:
+                evicted = next(
+                    (run_id for run_id in cache if self._is_run_idle(run_id)),
+                    None,
+                )
+                if evicted is None:
+                    break
+                cache.pop(evicted, None)
+        while len(self._workspace_paths) > self.max_retained_runs:
+            evicted_session = next(
+                (
+                    session_id
+                    for session_id in self._workspace_paths
+                    if session_id not in active_sessions
+                ),
+                None,
+            )
+            if evicted_session is None:
+                break
+            self._workspace_paths.pop(evicted_session, None)
+
     async def submit(self, command: RunCommand) -> RunHandle:
+        self._forget_finished_runs()
         if isinstance(command, StartRun):
             return await self._submit_start(command)
         if isinstance(command, ResumeRun):
@@ -1353,7 +1403,22 @@ class AgentRuntime:
     ) -> AsyncIterator[RuntimeEvent]:
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
-        bus = self._buses.setdefault(run_id, _LiveBus())
+        if not live:
+            # A history read consumes no live deltas. Registering a bus for it
+            # would let a client grow this process's state one entry per run id
+            # it browses, without ever scheduling work that prunes them.
+            try:
+                history = await self.journal.read(run_id, after_sequence=after_sequence)
+            except RunNotFoundError as exc:
+                raise RuntimeNotFound(str(exc)) from exc
+            for stored in history:
+                yield self._public_event(stored)
+            return
+        self._forget_finished_runs()
+        bus = self._buses.get(run_id)
+        if bus is None:
+            bus = _LiveBus()
+            self._buses[run_id] = bus
         durable_cursor = after_sequence
         # A reconnect has a durable cursor and must not replay transient token
         # deltas. A first subscription (cursor 0) can still drain the short
@@ -1371,10 +1436,6 @@ class AgentRuntime:
                 RunEventKind.RUN_COMPLETED,
                 RunEventKind.RUN_ABORTED,
             }
-            if not live:
-                for event in public_durable:
-                    yield event
-                return
 
             live_events = await bus.read(live_cursor)
             if live_events:
@@ -1418,6 +1479,12 @@ class AgentRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         for writer in writers:
             await writer.release()
+        # Every cache below is rebuildable from the journal. Dropping them keeps
+        # close() a full release of process-local state, not just of leases.
+        self._buses.clear()
+        self._results.clear()
+        self._task_errors.clear()
+        self._workspace_paths.clear()
 
     async def _reserve_session_request(
         self,
@@ -3359,6 +3426,7 @@ class AgentRuntime:
 
     async def _finalize(self, writer: _JournalWriter, result: AgentResult) -> None:
         self._results[writer.run_id] = result
+        self._forget_finished_runs()
         if result.status is RunStatus.COMPLETED:
             try:
                 raw_session = await self.store.commit_session(
@@ -3463,10 +3531,12 @@ class AgentRuntime:
             if completed.cancelled():
                 if writer._lease_error is not None:
                     self._task_errors[run_id] = writer._lease_error
+                self._forget_finished_runs()
                 return
             error = completed.exception()
             if error is not None:
                 self._task_errors[run_id] = error
+            self._forget_finished_runs()
 
         try:
             self._tasks[run_id] = task
