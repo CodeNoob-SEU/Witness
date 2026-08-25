@@ -336,7 +336,7 @@ async def test_owned_web_runtime_passes_bounded_metric_policy_to_telemetry(
     monkeypatch.setattr(
         web_module,
         "_build_agent_from_env",
-        lambda: (model, agent, "gpt-5.6-terra", "chat_completions"),
+        lambda **_: (model, agent, "gpt-5.6-terra", "chat_completions"),
     )
     policies: list[MetricCardinalityPolicy] = []
 
@@ -406,7 +406,7 @@ async def test_explicit_postgres_dsn_wins_and_pool_follows_app_lifespan(
     monkeypatch.setattr(
         web_module,
         "_build_agent_from_env",
-        lambda: (model, agent, "offline-runtime", "chat_completions"),
+        lambda **_: (model, agent, "offline-runtime", "chat_completions"),
     )
     app = create_app()
 

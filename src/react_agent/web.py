@@ -48,6 +48,7 @@ from .runtime import (
 from .telemetry import MetricCardinalityPolicy, create_telemetry
 from .tools import DebugExposure, tool
 from .workspace import GitWorktreeWorkspace, WorkspaceCheckpointStore
+from .workspace_tools import workspace_tools
 
 _STATIC_DIR = Path(__file__).with_name("static")
 _INDEX_FILE = _STATIC_DIR / "index.html"
@@ -468,7 +469,9 @@ def _build_workspace_from_env() -> WorkspaceCheckpointStore | None:
         raise RuntimeError("Unable to initialize the managed Git workspace.") from None
 
 
-def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
+def _build_agent_from_env(
+    *, workspace_enabled: bool = False
+) -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
     model_name = os.getenv("OPENAI_MODEL")
     if not model_name:
         raise RuntimeError("Set OPENAI_MODEL before starting react-agent-web.")
@@ -494,9 +497,15 @@ def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
         allow_insecure_http=_truthy_env("OPENAI_ALLOW_INSECURE_HTTP"),
         capabilities=capabilities,
     )
+    # File tools are registered only when a managed Git worktree exists. Without
+    # one they would have nowhere safe to write, and the Runtime's checkpoint,
+    # divergence and reconciliation guarantees would not apply to their effects.
+    registered = [calculate_expression, *workspace_tools()] if workspace_enabled else [
+        calculate_expression
+    ]
     agent = ReActAgent(
         model,
-        [calculate_expression],
+        registered,
         config=AgentConfig(
             max_steps=8,
             max_tool_calls=16,
@@ -1217,8 +1226,11 @@ def create_app(
         owned_journal: PostgresRunJournal | None = None
         try:
             if agent is None and runtime is None:
+                configured_workspace = _build_workspace_from_env()
                 owned_model, configured_agent, configured_model, configured_mode = (
-                    _build_agent_from_env()
+                    _build_agent_from_env(
+                        workspace_enabled=configured_workspace is not None
+                    )
                 )
                 metric_cardinality = _build_metric_cardinality_policy(
                     configured_agent,
@@ -1230,7 +1242,7 @@ def create_app(
                     journal,
                     model_name=configured_model,
                     telemetry=create_telemetry(cardinality=metric_cardinality),
-                    workspace=_build_workspace_from_env(),
+                    workspace=configured_workspace,
                 )
                 app.state.agent = configured_agent
                 app.state.runtime = owned_runtime
