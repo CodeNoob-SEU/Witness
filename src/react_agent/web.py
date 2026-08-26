@@ -394,6 +394,22 @@ def calculate_expression(
     return {"expression": expression, "result": _evaluate_expression(expression)}
 
 
+def _optional_env(name: str) -> str | None:
+    """Read an optional setting, treating blank as unset.
+
+    Compose and Kubernetes both express "not configured" by injecting an empty
+    string (``${VAR:-}``), so an empty value must mean the same as an absent
+    one. Otherwise an unset OPENAI_BASE_URL becomes "", which then fails the
+    HTTPS check as though the operator had configured a bad URL.
+    """
+
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
+
+
 def _truthy_env(name: str, *, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -519,8 +535,8 @@ def _build_demo_from_env() -> DemoEnvironment | None:
 
 
 def _build_workspace_from_env() -> WorkspaceCheckpointStore | None:
-    repository = os.getenv("REACT_AGENT_REPOSITORY")
-    managed_root = os.getenv("REACT_AGENT_WORKTREE_ROOT")
+    repository = _optional_env("REACT_AGENT_REPOSITORY")
+    managed_root = _optional_env("REACT_AGENT_WORKTREE_ROOT")
     if repository is None and managed_root is None:
         return None
     if not repository or not managed_root:
@@ -538,13 +554,13 @@ def _build_workspace_from_env() -> WorkspaceCheckpointStore | None:
 def _build_agent_from_env(
     *, workspace_enabled: bool = False
 ) -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
-    model_name = os.getenv("OPENAI_MODEL")
+    model_name = _optional_env("OPENAI_MODEL")
     if not model_name:
         raise RuntimeError("Set OPENAI_MODEL before starting react-agent-web.")
-    if not os.getenv("OPENAI_API_KEY"):
+    if not _optional_env("OPENAI_API_KEY"):
         raise RuntimeError("Set OPENAI_API_KEY before starting react-agent-web.")
 
-    raw_api_mode = os.getenv("OPENAI_API_MODE", "responses")
+    raw_api_mode = _optional_env("OPENAI_API_MODE") or "responses"
     if raw_api_mode not in ("responses", "chat_completions"):
         raise RuntimeError("OPENAI_API_MODE must be responses or chat_completions.")
     api_mode = cast(ApiMode, raw_api_mode)
@@ -559,7 +575,7 @@ def _build_agent_from_env(
     model = OpenAIModel(
         model_name,
         api_mode=api_mode,
-        base_url=os.getenv("OPENAI_BASE_URL"),
+        base_url=_optional_env("OPENAI_BASE_URL"),
         allow_insecure_http=_truthy_env("OPENAI_ALLOW_INSECURE_HTTP"),
         capabilities=capabilities,
     )

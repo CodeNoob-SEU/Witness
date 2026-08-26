@@ -21,6 +21,7 @@ from react_agent import (
     ToolMessage,
     Usage,
     UserMessage,
+    web,
 )
 from react_agent.web import SessionStore, calculate_expression, create_app
 
@@ -700,3 +701,32 @@ class _ChainlessRuntime:
 
     async def list_session_runs(self, session_id: str):  # pragma: no cover
         raise AssertionError("not used")
+def test_blank_optional_env_vars_are_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose and Kubernetes inject "" for an unset variable.
+
+    An empty OPENAI_BASE_URL previously reached OpenAIModel as a real value and
+    failed the HTTPS check, so `docker compose up` died with a message about a
+    URL the operator had never configured.
+    """
+
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_API_MODE", "")
+
+    _model, agent, model_name, api_mode = web._build_agent_from_env()
+
+    assert model_name == "test-model"
+    assert api_mode == "responses"
+    assert agent.registry.get("calculate_expression") is not None
+
+
+def test_blank_workspace_pair_disables_the_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACT_AGENT_REPOSITORY", "")
+    monkeypatch.setenv("REACT_AGENT_WORKTREE_ROOT", "")
+
+    assert web._build_workspace_from_env() is None

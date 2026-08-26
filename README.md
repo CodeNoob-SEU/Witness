@@ -16,7 +16,7 @@
   <a href="https://github.com/CodeNoob-SEU/Witness/actions/workflows/ci.yml">
     <img src="https://github.com/CodeNoob-SEU/Witness/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
-  <img src="https://img.shields.io/badge/tests-310%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-312%20passed-brightgreen" alt="tests">
   <img src="https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13-blue" alt="python">
   <img src="https://img.shields.io/badge/mypy-strict-blue" alt="mypy strict">
 </p>
@@ -81,7 +81,7 @@ ReAct 循环，还提供一套可审计的执行底座：把已经提交的事�
 | 计划审批门 | ◻️ 暂未覆盖 | 控制台展示的「执行计划」是事件流投影（进度），不是执行前的人工审批闸门 |
 | 跨主机搬迁 worktree | ◻️ 暂未覆盖 | 当前支持同机多进程或共享 Git 存储；跨主机工作区迁移留待后续阶段 |
 
-当前验证基线：本地 **`288 passed, 22 skipped`**，接上 PostgreSQL 后 **`310 passed`**（CI 在
+当前验证基线：本地 **`290 passed, 22 skipped`**，接上 PostgreSQL 后 **`312 passed`**（CI 在
 Python 3.11 / 3.12 / 3.13 上跑满，含 22 项需要真实 PostgreSQL 16 的 durable 测试与崩溃恢复
 测试）；Ruff、Mypy strict 和 wheel 构建均通过，发布包内包含 `001–010` 数据库 migration。
 本地 `uv sync --extra dev` 后 `uv run pytest -q` 即可跑通全部非数据库测试，不需要额外安装
@@ -193,6 +193,35 @@ Runtime 每个调用只取一次 before-tool checkpoint。
 绝对路径、`..` 穿越、指向工作区之外的 symlink、以及 workspace 模块的敏感路径清单全部拒绝；
 路径类问题以结构化结果返回而不是抛异常，好让模型自己纠正后重试。文件内容可能是仓库里的
 任何东西，所以这三个工具都保持默认的 `DebugExposure.METADATA`，不会进调试流。
+
+## 一键启动
+
+```bash
+# 崩溃恢复演示：不需要任何凭据，用的是脚本化模型
+docker compose run --rm demo
+
+# 完整工作台
+OPENAI_API_KEY=... OPENAI_MODEL=... docker compose up
+# 打开 http://127.0.0.1:8000
+```
+
+`docker compose up` 会依次拉起 PostgreSQL、**把 migration 作为独立 job 跑完**（而不是塞进应用
+启动路径），然后才启动应用——这正是生产环境该有的顺序，compose 的
+`service_completed_successfully` 把它固化下来了。应用容器还会在首次启动时初始化一个演示用
+Git 仓库，所以工作区读写工具开箱可用。
+
+镜像以非 root 用户运行；PostgreSQL 默认不对外发布端口，只有 compose 内部服务能连。默认镜像
+可以覆盖，方便镜像站或离线环境：
+
+```bash
+docker compose build --build-arg PYTHON_IMAGE=my-mirror/python:3.12-slim
+```
+
+可观测栈是独立的一份 compose，按需叠加：
+
+```bash
+docker compose -f docker-compose.observability.yml up -d   # Jaeger + Prometheus
+```
 
 ## Agent 评测
 
