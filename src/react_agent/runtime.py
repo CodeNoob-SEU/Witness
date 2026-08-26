@@ -1341,6 +1341,21 @@ class AgentRuntime:
             ),
         )
 
+    async def read_events(
+        self, run_id: str, *, after_sequence: int = 0
+    ) -> tuple[StoredRunEvent, ...]:
+        """Return the stored chain itself, not a projection of it.
+
+        ``load`` and ``follow`` both hand back reduced or safety-filtered views.
+        Auditing the chain — verifying its hashes, or reconstructing which tool
+        call moved the workspace tree — needs the stored events verbatim.
+        """
+
+        try:
+            return await self.journal.read(run_id, after_sequence=after_sequence)
+        except RunNotFoundError as exc:
+            raise RuntimeNotFound(str(exc)) from exc
+
     async def _submit_adjust_cost(self, command: AdjustCost) -> RunHandle:
         snapshot = await self.load(command.run_id)
         if snapshot.session_id is None:
