@@ -2,6 +2,7 @@ import asyncio
 import json
 import uuid
 from collections import deque
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -202,13 +203,10 @@ async def test_homepage_and_health_are_safe_same_origin_surfaces() -> None:
     assert "default-src 'self'" in homepage.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in homepage.headers["content-security-policy"]
     assert homepage.headers["x-content-type-options"] == "nosniff"
+    # The shell carries no inline script; the console ships as ES modules under
+    # /assets, which the CSP allows as 'self'.
     assert "innerHTML" not in homepage.text
-    assert ".textContent" in homepage.text
-    assert "[hidden] { display: none !important; }" in homepage.text
-    assert "new AbortController()" in homepage.text
-    assert "resetConversationView()" in homepage.text
-    assert "本轮未写入上下文" in homepage.text
-    assert "firstDefined(data.tree_id, data.workspace_tree" in homepage.text
+    assert '<script type="module" src="/assets/js/main.js">' in homepage.text
     assert health.status_code == 200
     assert health.json() == {
         "status": "ok",
@@ -583,3 +581,122 @@ async def test_stream_unknown_session_is_a_preflight_http_404() -> None:
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
     assert response.json() == {"detail": "Chat session was not found or has expired."}
+
+
+# --------------------------------------------------------------------------
+# Console assets. The UI is served from the wheel with no build step, so these
+# guard the properties a bundler would otherwise be relied on to preserve.
+# --------------------------------------------------------------------------
+
+_CONSOLE_ROOT = Path(__file__).resolve().parents[1] / "src" / "react_agent" / "static"
+
+
+def _console_scripts() -> list[Path]:
+    return sorted(_CONSOLE_ROOT.joinpath("assets", "js").rglob("*.js"))
+
+
+def test_the_console_ships_its_own_scripts_and_styles() -> None:
+    """A missing asset would leave a blank page, which no API test would catch."""
+
+    assert (_CONSOLE_ROOT / "index.html").is_file()
+    assert (_CONSOLE_ROOT / "assets" / "js" / "main.js").is_file()
+    for stylesheet in ("tokens", "base", "shell", "components"):
+        assert (_CONSOLE_ROOT / "assets" / "css" / f"{stylesheet}.css").is_file()
+    assert len(_console_scripts()) >= 10
+
+
+def test_no_console_script_assigns_innerhtml() -> None:
+    """Everything the console renders is derived from run data.
+
+    Some of that data is operator-supplied (a task prompt) and some is
+    tool-supplied (a file path, a diff line). Building DOM through
+    `textContent` rather than `innerHTML` is what keeps a crafted source file
+    from executing when a reviewer opens the patch.
+    """
+
+    offenders = [
+        script.relative_to(_CONSOLE_ROOT).as_posix()
+        for script in _console_scripts()
+        if "innerHTML" in script.read_text(encoding="utf-8")
+        or "outerHTML" in script.read_text(encoding="utf-8")
+        or "insertAdjacentHTML" in script.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_every_console_script_is_an_es_module_reachable_from_main() -> None:
+    """No orphaned or non-module file: the shell loads exactly one entry point."""
+
+    for script in _console_scripts():
+        source = script.read_text(encoding="utf-8")
+        assert "export " in source or script.name == "main.js", script.name
+        assert "require(" not in source, script.name
+
+
+# --------------------------------------------------------------------------
+# Console projection endpoints. These read durable facts back out; none of them
+# writes to the log or introduces a new event kind.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_console_config_reports_what_the_runtime_actually_is() -> None:
+    """The Settings view is only useful if it cannot flatter the deployment."""
+
+    app = create_app(agent=ReActAgent(ScriptedModel()), model_name="offline-test-model")
+
+    async with api_client(app) as client:
+        response = await client.get("/api/console")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"] == "offline-test-model"
+    assert payload["demo"] is False
+    assert payload["repository"] is None
+    # An in-memory journal must not be able to present itself as durable.
+    assert payload["journal"] in {"in_memory", "unknown"}
+    assert "git_worktree" in payload["workspace_policy"]["isolation"]
+    assert payload["workspace_policy"]["network"].startswith("not mediated")
+
+
+@pytest.mark.asyncio
+async def test_task_endpoints_are_absent_outside_demo_mode() -> None:
+    app = create_app(agent=ReActAgent(ScriptedModel()))
+
+    async with api_client(app) as client:
+        tasks = await client.get("/api/tasks")
+        dispatch = await client.post("/api/tasks/fix-session-refresh/runs")
+        evals = await client.get("/api/evals")
+
+    for response in (tasks, dispatch, evals):
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Demo mode is not enabled."}
+
+
+@pytest.mark.asyncio
+async def test_the_audit_endpoints_refuse_a_runtime_that_cannot_show_its_chain() -> None:
+    """Better a 501 than an empty chain that reads like a verified one."""
+
+    app = create_app(runtime=cast(object, _ChainlessRuntime()))
+
+    async with api_client(app) as client:
+        integrity = await client.get("/api/runs/whatever/integrity")
+
+    assert integrity.status_code == 501
+    assert "stored event chain" in integrity.json()["detail"]
+
+
+class _ChainlessRuntime:
+    """A Runtime view without `read_events`, like an older or partial adapter."""
+
+    async def submit(self, command):  # pragma: no cover - never reached
+        raise AssertionError("not used")
+
+    async def load(self, run_id: str):  # pragma: no cover - never reached
+        raise AssertionError("not used")
+
+    def follow(self, run_id: str, *, after_sequence: int = 0, live: bool = True):
+        raise AssertionError("not used")  # pragma: no cover - never reached
+
+    async def list_session_runs(self, session_id: str):  # pragma: no cover
+        raise AssertionError("not used")

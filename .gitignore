@@ -10,3 +10,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Local Claude Code preview config: contains machine-specific absolute paths.
+.claude/launch.json
