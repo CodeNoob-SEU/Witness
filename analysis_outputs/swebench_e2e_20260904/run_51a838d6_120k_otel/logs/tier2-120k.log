@@ -1,0 +1,36 @@
+[16:26:36] agent_revision=090d9298c3695dbc3f06d81c20e0f3870481d5802256c99717d89467d7cf0ea3 manifest=9e8078a81e75932d5a9d3226dc8be8caff9847dd327abee82d59f0ff4d5889ef
+[16:26:36] RUN_ID=51a838d640864885b372db50231ae550 created=True execution=2318d1a8c1b45d14a54e6f412cf96d7d
+[16:27:36] state=waiting_model status=None seq=103 models=12 tools=11
+[16:28:36] state=waiting_model status=None seq=139 models=16 tools=15
+[16:29:36] state=waiting_model status=None seq=189 models=21 tools=20
+[16:30:04] state=terminal status=completed seq=204 models=22 tools=21
+{
+ "run_id": "51a838d640864885b372db50231ae550",
+ "session_id": "pytest-7490-tier2-120k-otel",
+ "execution_id": "2318d1a8c1b45d14a54e6f412cf96d7d",
+ "state": "terminal",
+ "status": "completed",
+ "stop_reason": "completed",
+ "last_sequence": 204,
+ "last_hash": "fb3c6357ca289fb13bab0e456851ee3f37fd65e9633b4761d61dd4a04845dcc1",
+ "last_step": 22,
+ "counts": {
+  "model_calls": 22,
+  "tool_calls": 21,
+  "tool_executions": 21
+ },
+ "usage": {
+  "input_tokens": 336088,
+  "output_tokens": 6191,
+  "total_tokens": 342279,
+  "cached_input_tokens": 257536,
+  "reasoning_output_tokens": 4980,
+  "billable_tokens": 342279
+ },
+ "pending": {},
+ "executions": 1,
+ "model_attempts": 22,
+ "safe_checkpoints": 91,
+ "costs": 22,
+ "output": "Root cause: pytest cached the absence of an `xfail` marker before the test call, so an `xfail` marker added dynamically inside the test body was never re-evaluated when producing the test report.\n\nChange made: after the test call returns, pytest now re-checks `xfail` markers if no active `xfail` was previously cached, allowing markers added during the test to affect failure/XPASS reporting.\n\nVerification:\n- `testing/test_skipping.py::TestXFail::test_dynamic_xfail_set_during_funcarg_setup`\n- `testing/test_skipping.py::TestXFail::test_dynamic_xfail_no_run`\n- Full `testing/test_skipping.py`\n- Manual reproduction of the reported case now reports `xfailed` instead of `failed`."
+}

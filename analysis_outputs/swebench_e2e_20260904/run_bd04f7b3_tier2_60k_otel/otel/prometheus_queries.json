@@ -1,0 +1,115 @@
+{
+ "sum(react_agent_run_resume_count_total)": [
+  {
+   "metric": {},
+   "value": [
+    1788510355.369,
+    "3"
+   ]
+  }
+ ],
+ "sum by (gen_ai_token_type) (gen_ai_client_token_usage_sum{gen_ai_request_model=\"gpt-5.5\"})": [
+  {
+   "metric": {
+    "gen_ai_token_type": "billable"
+   },
+   "value": [
+    1788510355.372,
+    "167852"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_token_type": "cached_input"
+   },
+   "value": [
+    1788510355.372,
+    "121856"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_token_type": "input"
+   },
+   "value": [
+    1788510355.372,
+    "166343"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_token_type": "output"
+   },
+   "value": [
+    1788510355.372,
+    "1509"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_token_type": "reasoning_output"
+   },
+   "value": [
+    1788510355.372,
+    "814"
+   ]
+  }
+ ],
+ "sum(gen_ai_client_operation_duration_seconds_count{gen_ai_request_model=\"gpt-5.5\"})": [
+  {
+   "metric": {},
+   "value": [
+    1788510355.373,
+    "22"
+   ]
+  }
+ ],
+ "sum by (gen_ai_tool_name) (gen_ai_execute_tool_operation_count_total)": [
+  {
+   "metric": {
+    "gen_ai_tool_name": "read_file"
+   },
+   "value": [
+    1788510355.374,
+    "15"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_tool_name": "search_text"
+   },
+   "value": [
+    1788510355.374,
+    "1"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_tool_name": "list_dir"
+   },
+   "value": [
+    1788510355.374,
+    "2"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_tool_name": "run_tests"
+   },
+   "value": [
+    1788510355.374,
+    "3"
+   ]
+  },
+  {
+   "metric": {
+    "gen_ai_tool_name": "run_command"
+   },
+   "value": [
+    1788510355.374,
+    "1"
+   ]
+  }
+ ],
+ "sum(react_agent_policy_count_total) by (react_agent_policy)": []
+}

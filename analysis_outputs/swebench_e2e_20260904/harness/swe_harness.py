@@ -368,7 +368,31 @@ async def cmd_supervise(args) -> int:
             await runtime.close()
             await model.aclose()
             return 5
-        snapshot = await wait_terminal(runtime, resumed_run, CONFIG.max_wall_time_s + 300)
+
+        # Keep sweeping while the run executes: a later provider outage ends
+        # the execution with model_failed(retry_exhausted) and no terminal
+        # fact, and only a supervisor still looking will Resume it again.
+        async def keep_sweeping() -> None:
+            while True:
+                await asyncio.sleep(supervisor.interval_s)
+                try:
+                    sweep = await supervisor.sweep()
+                except Exception as exc:  # journal hiccup: log and keep going
+                    log(f"supervisor sweep failed: {type(exc).__name__}")
+                    continue
+                for item in sweep.runs:
+                    if item.outcome == "resumed" or item.run_id == resumed_run:
+                        log(f"supervisor: run={item.run_id} outcome={item.outcome} executions={item.executions} detail={item.detail}")
+
+        sweeper = asyncio.create_task(keep_sweeping())
+        try:
+            snapshot = await wait_terminal(runtime, resumed_run, CONFIG.max_wall_time_s * 3)
+        finally:
+            sweeper.cancel()
+            try:
+                await sweeper
+            except (asyncio.CancelledError, Exception):
+                pass
         print_snapshot(snapshot)
         await runtime.close()
     await model.aclose()

@@ -1,0 +1,37 @@
+[16:34:04] agent_revision=090d9298c3695dbc3f06d81c20e0f3870481d5802256c99717d89467d7cf0ea3 manifest=9e8078a81e75932d5a9d3226dc8be8caff9847dd327abee82d59f0ff4d5889ef
+[16:34:29] supervisor: run=2f166b1b6afa4f69bba5ce4f78a49030 outcome=resumed executions=2 detail=7546a2fe936d4117a8d75ff4cd93ede6
+[16:35:29] state=waiting_model status=None seq=95 models=11 tools=10
+[16:36:29] state=waiting_model status=None seq=149 models=17 tools=16
+[16:37:29] state=waiting_model status=None seq=218 models=24 tools=23
+[16:38:29] state=waiting_model status=None seq=298 models=32 tools=31
+[16:38:49] state=terminal status=completed seq=313 models=33 tools=32
+{
+ "run_id": "2f166b1b6afa4f69bba5ce4f78a49030",
+ "session_id": "pytest-7490-120k-crash-otel",
+ "execution_id": "7546a2fe936d4117a8d75ff4cd93ede6",
+ "state": "terminal",
+ "status": "completed",
+ "stop_reason": "completed",
+ "last_sequence": 313,
+ "last_hash": "b9c257d2e3c898652381b0880ccf7edcd64d0d0577cbfd26555e26ca0911fca3",
+ "last_step": 33,
+ "counts": {
+  "model_calls": 33,
+  "tool_calls": 32,
+  "tool_executions": 32
+ },
+ "usage": {
+  "input_tokens": 678853,
+  "output_tokens": 7631,
+  "total_tokens": 686484,
+  "cached_input_tokens": 453120,
+  "reasoning_output_tokens": 5239,
+  "billable_tokens": 686484
+ },
+ "pending": {},
+ "executions": 2,
+ "model_attempts": 33,
+ "safe_checkpoints": 133,
+ "costs": 33,
+ "output": "Summary:\n- Root cause: pytest cached the absence of an `xfail` marker before the test call, so an `xfail` marker added dynamically during the test body was never re-evaluated when creating the test report.\n- Change made: updated `src/_pytest/skipping.py` to track the number of `xfail` markers seen during evaluation and refresh the cached xfail evaluation when new xfail markers are detected before report handling.\n\nVerification:\n- Confirmed the reported dynamic `request.node.add_marker(pytest.mark.xfail(...))` reproducer now reports `xfailed`.\n- Ran:\n  - `testing/test_skipping.py::TestXFail::test_dynamic_xfail_set_during_funcarg_setup`\n  - `testing/test_skipping.py::TestXFail::test_dynamic_xfail_no_run`\n  - `testing/test_skipping.py`\n- All passed."
+}

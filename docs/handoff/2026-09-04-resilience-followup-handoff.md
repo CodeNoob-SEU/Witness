@@ -56,17 +56,31 @@
 - `examples/chaos_resume.py --supervisor` 在 server3 上跑通，输出见本次会话（17 个事件、hash chain 校验通过、executions=2）。
 - 本仓库 `analysis_outputs/swebench_e2e_20260904/harness/` 是 server3 harness 的镜像副本，已同步更新。
 
+## 2.5 下午补记：OpenTelemetry 通电 + Tier 2 压测已做（commit `e1b805d` + 证据 commit）
+
+用户点头后跑了三条真实 run，证据在 `analysis_outputs/swebench_e2e_20260904/README.md` 下半部分和三个
+`run_*_otel/` 目录（每个含 `otel/jaeger_traces.json`、`collector_metrics.prom`、`prometheus_queries.json`）。结论：
+
+- **Tier 2 在 60k 下是病态的**：44 次压缩（gpt-5.5，每次 ~104 s）吃掉 93 分钟里的 64 分钟，其中 38 次压完仍超预算 → hard fallback；
+  step 40 时被操作员 `CancelRun` 终止（`run_aborted`，未 resolved）。**120k 下 0 次压缩、0 次 hard fallback，3.5–6 分钟 resolved**，
+  126k 峰值靠 Tier 1 的 73 次确定性淘汰就够。决定：不降默认预算，不再给压缩质量投入。
+- **§1.1 的机制在真实世界触发了两次**：relay 两次 503 风暴（`server_is_overloaded`）→ 4 次 retryable attempt 退避 → `retry_exhausted`
+  → lease 释放 → `run_resumed(resume_reason=model_retry)` 从同一 step 续跑。顺带发现 harness 的 `supervise` 接管一次就不再扫描
+  （run 空等 18 分钟），已改成持续扫描到终态。
+- **OTel**：真实 Collector + Jaeger + Prometheus（server3，1panel 镜像拉的 `jaegertracing/all-in-one:1.65.0`、
+  `otel/opentelemetry-collector-contrib:0.120.0`、`prom/prometheus:v3.1.0`）。崩溃 run 在 Jaeger 里是两条 trace：被 kill 的 execution
+  只有子 span（根 span 没机会结束），恢复的 execution 根 span 带 `execution.kind=resume` 和指向前者的 link。
+  修了两处：tail sampling 在第一个 span 到达 5 s 后就决定，根 span 独有的属性永远赶不上 → 子 span 现在都带 `execution.kind`；
+  成功 trace 抽样率改成 `WITNESS_OTEL_SUCCESS_SAMPLE_PERCENT`（默认 10，证据 run 用 100）。model span 多了
+  `react_agent.model.{status_code,error_code,retryable,retry_exhausted,execution_attempt}`。
+  没修：httpx 自动插桩的 `POST /v1/responses` span 是独立 trace，没挂在 `chat` 下（适配器 `start_span` 后没激活 context）。
+  Prometheus 的 series 在 worker 进程退出几分钟后过期，事后总量以 journal 为准。
+- server3 上 `~/witness-swebench/harness/run.sh` 多了 `WITNESS_OTEL=1` 开关；观测栈用 `--restart unless-stopped` 常驻。
+  WSL keepalive 的 ssh 中途断过一次（exit 255）——用 `-o ServerAliveCountMax=6` 重开后没再断，但它仍是单点，长任务前先看它活着。
+
 ## 3. 没做的（按优先级）
 
-1. **Tier 2 压测（上一份 §6.4）——需要用户点头再花钱。** 约 100 万 token 的真实 `gpt-5.5` run。准备工作已完成，一条命令：
-   ```bash
-   cd ~/witness-swebench && WITNESS_MAX_CONTEXT_CHARS=60000 WITNESS_WORKER_ID=worker-A \
-     nohup harness/run.sh start --instance $HOME/witness-swebench/instance.json \
-     --session pytest-7490-tier2 --key tier2-1 > logs/tier2.log 2>&1 &
-   ```
-   看 `report` 里的 `compression_calls / hard_fallbacks` 和 `evaluate` 是否仍 resolved。顺便可以验证 `read_only=true` 的使用率
-   （`tool_started.resume_policy` 里 `idempotent_retry` 的占比）和有没有触发 `model_failed(retryable=true)`。
-   记得先开 WSL keepalive（见上一份 §5）。
+1. ~~Tier 2 压测~~ 已做，见 §2.5。
 2. **`workspace_tools` / `repo_tools` 统一（上一份 §0.5）。** 刻意没做：要改 `demo.py` 的 scripted model、`evals.py`、
    `static/assets/js/projection.js` 标签、`tests/test_workspace_tools*.py`、`tests/test_demo_fixture.py`、README 崩溃演示里的事件清单和
    DESIGN.md，收益是整洁而不是可验证的能力。建议路径：让 `repo_tools` 的读写工具接受 `workspace_tools` 的返回约定
@@ -74,6 +88,7 @@
 3. **预算语义（上一份 §6.5 剩余）**：pricing catalog 示例 + 按 token/成本/墙钟设预算。两次 run 的 42 条 `cost_recorded` 全是
    `price_not_found`，`PricingCatalog("unconfigured")`。
 4. 小：`RunSupervisor` 的退避状态是进程内的；如果以后有多个 supervisor 进程，把"上次 Resume 时间"落到 journal 或 store。
+5. 小：telemetry 适配器在模型/工具调用期间激活 span context，让 httpx 自动插桩的 provider HTTP span 成为 `chat` 的子 span。
 
 ## 4. 验证命令
 

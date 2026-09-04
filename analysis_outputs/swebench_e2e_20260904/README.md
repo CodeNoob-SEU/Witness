@@ -15,3 +15,63 @@ is the diagnostic capture that exposed the `parsed_arguments` replay bug fixed i
 `provider.py`. Run 2's evaluation copy had to be seeded with the gitignored
 `src/_pytest/_version.py` (see `evaluation.json` note) because Git worktrees only
 materialize tracked files.
+
+## 2026-09-04 afternoon: OpenTelemetry end-to-end + Tier 2 pressure runs
+
+Same instance, model and relay. Three more runs, all with the Collector + Jaeger + Prometheus stack
+from `docker-compose.observability.yml` running on server3 (`WITNESS_OTEL=1` in `harness/run.sh`
+→ `opentelemetry-instrument`, `WITNESS_OTEL_SUCCESS_SAMPLE_PERCENT=100` on the Collector).
+Per-run directories hold `report.json`, `evaluation.json`, `model_patch.diff`,
+`events.public.ndjson`, worker/supervisor logs, and `otel/`: `jaeger_traces.json` (every trace
+tagged with the run id, exported from Jaeger's API), `collector_metrics.prom` (the Collector's
+Prometheus endpoint), `prometheus_queries.json`, `stack.txt`.
+
+| Run | `max_context_chars` | Crashes / outages | Steps · model calls (of which Tier 2 compressions) · hard fallbacks | Peak projected chars | Wall | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| `run_bd04f7b3_tier2_60k_otel` | 60,000 | SIGKILL at step 17; two real provider 503 storms (steps 18 and 32) | 40 · 96 (**44**) · **38** | 236,164 | 93 min, then aborted by operator | patch at step 40: FAIL_TO_PASS 0/2, PASS_TO_PASS 78/78 |
+| `run_51a838d6_120k_otel` | 120,000 | none | 22 · 22 (0) · 0 | 86,050 | 3.5 min | **resolved** 2/2 + 78/78 |
+| `run_2f166b1b_120k_crash_otel` | 120,000 | SIGKILL during the step-6 model call; supervisor resumed 29 s later | 33 · 33 (0) · 0 | 125,951 (73 deterministic evictions) | 6.0 min | **resolved** 2/2 + 78/78 |
+
+Journal numbers above come from the PostgreSQL journal (`events.public.ndjson` is the public
+projection and omits `compression_calls` / `input_chars`).
+
+### What the Tier 2 run answered
+
+At 60k chars the governor is pathological, not merely lossy: 44 generative compressions
+(gpt-5.5, ~104 s each) consumed 64 of the first 89 minutes, and 38 of them still could not meet
+the budget and ended in a hard fallback. The model's own turns took 4.3 minutes in total. At 120k
+the same task never needed a compression call (Tier 1 eviction alone absorbed a 126k peak) and
+resolved in 3.5–6 minutes. Decision: keep Tier 2 as the safety net it is, do not lower the default
+budget, and do not invest further in compression quality before a task actually needs it.
+
+### What the outages answered
+
+The 60k run hit two genuine relay outages (`503 server_is_overloaded`; the raw status/timing
+capture is in `logs/provider_http_503_window.ndjson`, 45 rows). Both produced exactly the journal
+shape `af03f91` was written for: four `model_failed(retryable=true, terminal_decision=false)`
+attempts with 2/4/8 s backoff, then `retry_exhausted=true`, no `run.completed`, lease released,
+`run_resumed(resume_reason=model_retry)` at the **same step**. The first outage exposed a harness
+bug — the `supervise` subcommand stopped sweeping after its first Resume, so the run sat idle for
+18 minutes until a fresh supervisor was started; `swe_harness.py` now keeps sweeping until the run
+is terminal, and the second outage cost under a minute (resumed 1 s after the lease release,
+again 30 s later when the provider was still down).
+
+### What OpenTelemetry answered
+
+- Traces: the crash run produces two traces, the killed execution (child spans only — its
+  `invoke_agent` root never ended) and the resumed execution whose root carries
+  `react_agent.execution.kind=resume` and a link to the first. Model spans carry
+  `react_agent.model.status_code/error_code/retryable/retry_exhausted`.
+- Metrics: `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`,
+  `gen_ai.execute_tool.operation.count` by tool, `react_agent.run.resume.count`. The Collector's
+  Prometheus exporter expires series a few minutes after a worker process exits, so
+  `prometheus_queries.json` reflects the live window at query time, not run totals; the journal is
+  the source of truth for totals.
+- Two findings fixed in `e1b805d`: tail sampling decides 5 s after the *first* span of a trace
+  arrives, long before the root span (the only one that carried `execution.kind`) ends, so the
+  shipped keep-recovery policy could never match a real run — child spans now repeat the attribute.
+  And the success sampling percentage is now an environment variable (10 by default, 100 here).
+- Not fixed: the `httpx` auto-instrumentation spans (`POST …/v1/responses`) are separate
+  single-span traces rather than children of `chat`, because the adapter starts spans without
+  activating them as the current context. They carry only method/URL/status and are excluded from
+  the exported `jaeger_traces.json`.

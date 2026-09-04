@@ -1,0 +1,89 @@
+diff --git a/src/_pytest/skipping.py b/src/_pytest/skipping.py
+index 335e10996..43d203301 100755
+--- a/src/_pytest/skipping.py
++++ b/src/_pytest/skipping.py
+@@ -224,11 +224,23 @@ def evaluate_xfail_marks(item: Item) -> Optional[Xfail]:
+ 
+ # Whether skipped due to skip or skipif marks.
+ skipped_by_mark_key = StoreKey[bool]()
+-# Saves the xfail mark evaluation. Can be refreshed during call if None.
++# Saves the xfail mark evaluation. Can be refreshed if dynamically added xfail
++# markers are found.
+ xfailed_key = StoreKey[Optional[Xfail]]()
++# Saves the number of xfail marks seen when xfailed_key was last refreshed.
++xfailed_marker_count_key = StoreKey[int]()
+ unexpectedsuccess_key = StoreKey[str]()
+ 
+ 
++def _get_xfail_marker_count(item: Item) -> int:
++    return sum(1 for _ in item.iter_markers(name="xfail"))
++
++
++def _evaluate_xfail_marks(item: Item) -> Optional[Xfail]:
++    item._store[xfailed_marker_count_key] = _get_xfail_marker_count(item)
++    return evaluate_xfail_marks(item)
++
++
+ @hookimpl(tryfirst=True)
+ def pytest_runtest_setup(item: Item) -> None:
+     item._store[skipped_by_mark_key] = False
+@@ -239,7 +251,7 @@ def pytest_runtest_setup(item: Item) -> None:
+         skip(skipped.reason)
+ 
+     if not item.config.option.runxfail:
+-        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
++        item._store[xfailed_key] = xfailed = _evaluate_xfail_marks(item)
+         if xfailed and not xfailed.run:
+             xfail("[NOTRUN] " + xfailed.reason)
+ 
+@@ -248,7 +260,7 @@ def pytest_runtest_setup(item: Item) -> None:
+ def pytest_runtest_call(item: Item) -> Generator[None, None, None]:
+     xfailed = item._store.get(xfailed_key, None)
+     if xfailed is None:
+-        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
++        item._store[xfailed_key] = xfailed = _evaluate_xfail_marks(item)
+ 
+     if not item.config.option.runxfail:
+         if xfailed and not xfailed.run:
+@@ -276,21 +288,26 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+         assert call.excinfo.value.msg is not None
+         rep.wasxfail = "reason: " + call.excinfo.value.msg
+         rep.outcome = "skipped"
+-    elif not rep.skipped and xfailed:
+-        if call.excinfo:
+-            raises = xfailed.raises
+-            if raises is not None and not isinstance(call.excinfo.value, raises):
+-                rep.outcome = "failed"
+-            else:
+-                rep.outcome = "skipped"
+-                rep.wasxfail = xfailed.reason
+-        elif call.when == "call":
+-            if xfailed.strict:
+-                rep.outcome = "failed"
+-                rep.longrepr = "[XPASS(strict)] " + xfailed.reason
+-            else:
+-                rep.outcome = "passed"
+-                rep.wasxfail = xfailed.reason
++    elif not rep.skipped:
++        if xfailed is None:
++            old_count = item._store.get(xfailed_marker_count_key, 0)
++            if old_count != _get_xfail_marker_count(item):
++                item._store[xfailed_key] = xfailed = _evaluate_xfail_marks(item)
++        if xfailed:
++            if call.excinfo:
++                raises = xfailed.raises
++                if raises is not None and not isinstance(call.excinfo.value, raises):
++                    rep.outcome = "failed"
++                else:
++                    rep.outcome = "skipped"
++                    rep.wasxfail = xfailed.reason
++            elif call.when == "call":
++                if xfailed.strict:
++                    rep.outcome = "failed"
++                    rep.longrepr = "[XPASS(strict)] " + xfailed.reason
++                else:
++                    rep.outcome = "passed"
++                    rep.wasxfail = xfailed.reason
+ 
+     if (
+         item._store.get(skipped_by_mark_key, True)
