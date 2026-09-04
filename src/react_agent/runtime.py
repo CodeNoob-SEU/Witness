@@ -3668,7 +3668,7 @@ class AgentRuntime:
             if recovery is None:
                 registered = self.agent.registry.get(call.name)
                 policy = (
-                    registered.resume_policy.value
+                    registered.resume_policy_for(call).value
                     if registered is not None
                     else ToolResumePolicy.REQUIRE_OPERATOR.value
                 )

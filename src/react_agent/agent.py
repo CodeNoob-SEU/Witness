@@ -193,6 +193,7 @@ class ReActAgent:
                 },
                 "version": registered.version,
                 "resume_policy": registered.resume_policy.value,
+                "call_resume_policy": registered.has_call_resume_policy,
                 "context_policy": {
                     "effect": registered.context_policy.effect.value,
                     "identity_fields": registered.context_policy.identity_fields,
@@ -709,7 +710,7 @@ class ReActAgent:
                 call_key=call_key,
                 public_data={
                     "resume_policy": (
-                        registered.resume_policy.value
+                        registered.resume_policy_for(call).value
                         if (registered := self.registry.get(call.name)) is not None
                         else "require_operator"
                     ),
@@ -1499,7 +1500,7 @@ class ReActAgent:
                 call_key = f"s{step}:t{tool_index}"
                 planned_public = argument_debug_data(call)
                 planned_public["resume_policy"] = (
-                    registered.resume_policy.value
+                    registered.resume_policy_for(call).value
                     if (registered := self.registry.get(call.name)) is not None
                     else "require_operator"
                 )

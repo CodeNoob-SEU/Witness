@@ -9,8 +9,9 @@ resume and context semantics are declared once, correctly:
 * ``write_file`` / ``edit_file`` are idempotent mutations keyed by ``path``, so
   Tier 1 context governance can retire superseded observations;
 * ``run_tests`` is an idempotent execution that resume may retry automatically;
-* ``run_command`` is *not* idempotent and therefore fails closed into operator
-  reconciliation when a worker dies mid-command.
+* ``run_command`` is *not* idempotent by default and fails closed into
+  operator reconciliation when a worker dies mid-command; a call the model
+  declares ``read_only=true`` is planned with ``idempotent_retry`` instead.
 
 Every path is resolved inside the workspace injected through
 ``ToolExecutionContext``; symlink escapes, ``.git`` internals, and sensitive
@@ -34,10 +35,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .context import ObservationEffect, ToolContextPolicy
-from .tools import DebugExposure, Tool, ToolError, ToolExecutionContext
+from .tools import DebugExposure, Tool, ToolError, ToolExecutionContext, ToolResumePolicy
 from .workspace import _DEFAULT_SENSITIVE_PATTERNS, _is_sensitive
 
-REPOSITORY_TOOLS_VERSION = "repo-tools-v1"
+REPOSITORY_TOOLS_VERSION = "repo-tools-v2"
 
 _HIDDEN_ENTRIES = frozenset({".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
 _DEFAULT_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TZ")
@@ -485,17 +486,23 @@ def create_repository_tools(
         target.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
         return {"path": path, "already_applied": False}
 
-    async def run_command(command: str, *, context: ToolExecutionContext) -> dict[str, Any]:
+    async def run_command(
+        command: str, read_only: bool, *, context: ToolExecutionContext
+    ) -> dict[str, Any]:
         """Run one shell command from the repository root.
 
         Returns the exit code and bounded output. Use it for exploration and
-        builds; use edit_file/write_file to change files.
+        builds; use edit_file/write_file to change files. Set read_only=true
+        only when the command changes nothing (no files, no state, no external
+        systems), e.g. git status, ls, cat, grep, python -c "import x": such a
+        call is retried automatically if the process crashes while it runs.
+        A crash during any other command requires an operator.
         """
 
         if not command.strip():
             raise RepositoryToolError("command must not be blank.")
         result = await runner.run(command, cwd=workspace.root(context), timeout_s=command_timeout_s)
-        return _command_payload(result)
+        return {"read_only": read_only, **_command_payload(result)}
 
     async def run_tests(args: str, *, context: ToolExecutionContext) -> dict[str, Any]:
         """Run the project's test command with extra arguments.
@@ -569,10 +576,19 @@ def create_repository_tools(
             allow_repeated=True,
             context_policy=ToolContextPolicy(ObservationEffect.EXECUTE, ("command",)),
             debug_exposure=DebugExposure.METADATA,
+            call_resume_policy=_run_command_resume_policy,
             version=REPOSITORY_TOOLS_VERSION,
         )
     )
     return tuple(tools)
+
+
+def _run_command_resume_policy(arguments: Mapping[str, Any]) -> ToolResumePolicy:
+    """Only a command the model declared read-only may be retried after a crash."""
+
+    if arguments.get("read_only") is True:
+        return ToolResumePolicy.IDEMPOTENT_RETRY
+    return ToolResumePolicy.REQUIRE_OPERATOR
 
 
 def _quoted_test_args(args: str) -> tuple[str, ...]:

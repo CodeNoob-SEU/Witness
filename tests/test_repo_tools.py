@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from react_agent import ObservationEffect, ReActAgent, ToolResumePolicy
-from react_agent.models import ModelRequest, ModelResponse
+from react_agent.models import ModelRequest, ModelResponse, ToolCall
 from react_agent.repo_tools import (
     REPOSITORY_TOOLS_VERSION,
     CommandResult,
@@ -193,7 +193,9 @@ async def test_run_command_uses_a_scrubbed_environment(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
     monkeypatch.setenv("REACT_AGENT_POSTGRES_DSN", "postgresql://secret")
     tools = _by_name(create_repository_tools(command_runner=LocalCommandRunner(env={"DEMO": "1"})))
-    result = await tools["run_command"].invoke({"command": "env; pwd"}, context=_context(repo))
+    result = await tools["run_command"].invoke(
+        {"command": "env; pwd", "read_only": True}, context=_context(repo)
+    )
     assert result["exit_code"] == 0 and result["timed_out"] is False
     assert "OPENAI_API_KEY" not in result["stdout"]
     assert "REACT_AGENT_POSTGRES_DSN" not in result["stdout"]
@@ -205,7 +207,8 @@ async def test_run_command_uses_a_scrubbed_environment(
 async def test_run_command_timeout_kills_the_process_group(repo: Path) -> None:
     tools = _by_name(create_repository_tools(command_timeout_s=0.5))
     result = await tools["run_command"].invoke(
-        {"command": "echo started; sleep 30; echo finished"}, context=_context(repo)
+        {"command": "echo started; sleep 30; echo finished", "read_only": False},
+        context=_context(repo),
     )
     assert result["timed_out"] is True and result["exit_code"] is None
     assert "started" in result["stdout"] and "finished" not in result["stdout"]
@@ -253,6 +256,7 @@ def test_declared_policies_and_manifest_are_stable() -> None:
         assert tools[name].resume_policy is ToolResumePolicy.IDEMPOTENT_RETRY
     assert tools["run_command"].idempotent is False
     assert tools["run_command"].resume_policy is ToolResumePolicy.REQUIRE_OPERATOR
+    assert tools["run_command"].has_call_resume_policy is True
     assert tools["read_file"].context_policy.effect is ObservationEffect.READ
     assert tools["read_file"].context_policy.identity_fields == ("path", "start_line", "end_line")
     assert tools["edit_file"].context_policy.effect is ObservationEffect.MUTATE
@@ -273,3 +277,25 @@ def test_declared_policies_and_manifest_are_stable() -> None:
 async def test_run_command_can_require_approval(repo: Path) -> None:
     tools = _by_name(create_repository_tools(require_command_approval=True))
     assert tools["run_command"].requires_approval is True
+
+
+@pytest.mark.parametrize(
+    ("arguments", "policy"),
+    [
+        ('{"command":"git status","read_only":true}', ToolResumePolicy.IDEMPOTENT_RETRY),
+        ('{"command":"pip install .","read_only":false}', ToolResumePolicy.REQUIRE_OPERATOR),
+        ('{"command":"git status"}', ToolResumePolicy.REQUIRE_OPERATOR),
+        ("not json", ToolResumePolicy.REQUIRE_OPERATOR),
+    ],
+)
+def test_run_command_resume_policy_is_decided_per_call(
+    arguments: str, policy: ToolResumePolicy
+) -> None:
+    tools = _by_name(create_repository_tools())
+    call = ToolCall("call-1", "run_command", arguments)
+    assert tools["run_command"].resume_policy_for(call) is policy
+    # Other tools keep their static policy regardless of arguments.
+    assert (
+        tools["run_tests"].resume_policy_for(ToolCall("call-2", "run_tests", "{}"))
+        is ToolResumePolicy.IDEMPOTENT_RETRY
+    )

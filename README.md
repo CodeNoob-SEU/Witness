@@ -478,7 +478,11 @@ tools = create_repository_tools(
 `write_file`/`edit_file` 是按 `path` 识别的 `MUTATE`，因此 Tier 1 治理可以淘汰被替代的旧读取；
 `edit_file` 对已应用的替换返回 `already_applied`，所以它和 `run_tests` 一样是真正幂等的，中断后
 可自动重试；`run_command` 显式声明为非幂等，worker 在命令执行中死亡时进入 reconciliation 而不是
-盲目重跑。所有路径都在 `ToolExecutionContext.workspace_path` 内解析，越界、符号链接逃逸、
+盲目重跑——除非模型在调用时声明 `read_only=true`（`git status`、`ls`、`grep` 这类不改任何东西的命令）：
+这一条调用在 `tool_planned`/`tool_started` 事实里记为 `idempotent_retry`，崩溃后自动重试。这是
+`Tool(call_resume_policy=...)` 的通用机制：hook 看到校验后的参数，只能在静态策略基础上做逐调用的判定，
+hook 出错或参数无效时回落到静态策略（对 `run_command` 即 `require_operator`）。所有路径都在
+`ToolExecutionContext.workspace_path` 内解析，越界、符号链接逃逸、
 `.git` 内部和敏感文件（密钥、`.env`、credentials）都会被拒绝；`run_tests` 的参数经 `shlex`
 逐个引用，模型无法注入 shell 语法。
 

@@ -86,6 +86,10 @@ class ToolResumePolicy(StrEnum):
     NEVER_RETRY = "never_retry"
 
 
+CallResumePolicy = Callable[[Mapping[str, Any]], ToolResumePolicy]
+"""Decide one call's resume policy from its validated arguments."""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolExecutionContext:
     """Framework-owned execution metadata, excluded from the model schema."""
@@ -225,6 +229,7 @@ class Tool:
     """A callable hidden behind a validated, allowlisted interface."""
 
     __slots__ = (
+        "_call_resume_policy",
         "_context_parameter",
         "_fn",
         "_input_model",
@@ -257,6 +262,7 @@ class Tool:
         context_policy: ToolContextPolicy | None = None,
         debug_exposure: DebugExposure = DebugExposure.METADATA,
         resume_policy: ToolResumePolicy | None = None,
+        call_resume_policy: CallResumePolicy | None = None,
         lifecycle: ToolLifecycle | None = None,
         private_result_encoder: PrivateResultEncoder | None = None,
         version: str = "1",
@@ -273,6 +279,7 @@ class Tool:
         self.resume_policy = resume_policy or (
             ToolResumePolicy.IDEMPOTENT_RETRY if idempotent else ToolResumePolicy.REQUIRE_OPERATOR
         )
+        self._call_resume_policy = call_resume_policy
         self.lifecycle = lifecycle
         self._private_result_encoder = private_result_encoder
         self.version = version
@@ -295,6 +302,8 @@ class Tool:
             raise ConfigurationError("tool resume_policy must be a ToolResumePolicy value")
         if private_result_encoder is not None and not callable(private_result_encoder):
             raise ConfigurationError("private_result_encoder must be callable or None")
+        if call_resume_policy is not None and not callable(call_resume_policy):
+            raise ConfigurationError("call_resume_policy must be callable or None")
         if self.resume_policy is ToolResumePolicy.IDEMPOTENT_RETRY and not idempotent:
             raise ConfigurationError("idempotent_retry requires idempotent=True")
         if not version.strip() or len(version) > 128:
@@ -362,6 +371,32 @@ class Tool:
             field_name: getattr(validated, field_name)
             for field_name in self._input_model.model_fields
         }
+
+    @property
+    def has_call_resume_policy(self) -> bool:
+        """Whether the resume policy is decided per call from its arguments."""
+
+        return self._call_resume_policy is not None
+
+    def resume_policy_for(self, call: ToolCall) -> ToolResumePolicy:
+        """The resume policy for one planned call.
+
+        A ``call_resume_policy`` hook sees the validated arguments and may
+        relax the tool's static policy for calls it knows are safe (e.g. a
+        shell command the model declared read-only). Any hook failure, invalid
+        arguments, or non-policy return falls back to the static policy, which
+        for non-idempotent tools is the fail-closed ``REQUIRE_OPERATOR``.
+        """
+
+        if self._call_resume_policy is None:
+            return self.resume_policy
+        try:
+            decided = self._call_resume_policy(MappingProxyType(self.validate(call.arguments)))
+        except Exception:
+            return self.resume_policy
+        if not isinstance(decided, ToolResumePolicy):
+            return self.resume_policy
+        return decided
 
     async def invoke(
         self,
@@ -620,6 +655,7 @@ def tool(
     context_policy: ToolContextPolicy | None = None,
     debug_exposure: DebugExposure = DebugExposure.METADATA,
     resume_policy: ToolResumePolicy | None = None,
+    call_resume_policy: CallResumePolicy | None = None,
     version: str = "1",
 ) -> Tool: ...
 
@@ -638,6 +674,7 @@ def tool(
     context_policy: ToolContextPolicy | None = None,
     debug_exposure: DebugExposure = DebugExposure.METADATA,
     resume_policy: ToolResumePolicy | None = None,
+    call_resume_policy: CallResumePolicy | None = None,
     version: str = "1",
 ) -> Callable[[Callable[P, R]], Tool]: ...
 
@@ -655,6 +692,7 @@ def tool(
     context_policy: ToolContextPolicy | None = None,
     debug_exposure: DebugExposure = DebugExposure.METADATA,
     resume_policy: ToolResumePolicy | None = None,
+    call_resume_policy: CallResumePolicy | None = None,
     version: str = "1",
 ) -> Tool | Callable[[Callable[P, R]], Tool]:
     """Turn a typed callable into a schema-validated Tool."""
@@ -672,6 +710,7 @@ def tool(
             context_policy=context_policy,
             debug_exposure=debug_exposure,
             resume_policy=resume_policy,
+            call_resume_policy=call_resume_policy,
             version=version,
         )
 

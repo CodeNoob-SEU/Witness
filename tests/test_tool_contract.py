@@ -221,3 +221,49 @@ async def test_unserializable_tool_result_is_still_reported_as_an_error() -> Non
     assert payload["ok"] is False
     assert payload["error"]["code"] == "OUTPUT_SERIALIZATION"
     assert message.is_error is True
+
+
+def test_call_resume_policy_hook_falls_back_to_the_static_policy() -> None:
+    from react_agent import ConfigurationError, ToolResumePolicy
+
+    def policy(arguments):
+        if arguments["mode"] == "boom":
+            raise RuntimeError("hook bug")
+        if arguments["mode"] == "wrong-type":
+            return "idempotent_retry"
+        return (
+            ToolResumePolicy.IDEMPOTENT_RETRY
+            if arguments["mode"] == "read"
+            else ToolResumePolicy.NEVER_RETRY
+        )
+
+    @tool(call_resume_policy=policy)
+    def shell(mode: str) -> str:
+        """Run something whose safety depends on its arguments."""
+
+        return mode
+
+    def decided(arguments: str) -> ToolResumePolicy:
+        return shell.resume_policy_for(ToolCall("c", "shell", arguments))
+
+    assert shell.has_call_resume_policy is True
+    assert shell.resume_policy is ToolResumePolicy.REQUIRE_OPERATOR
+    assert decided('{"mode":"read"}') is ToolResumePolicy.IDEMPOTENT_RETRY
+    assert decided('{"mode":"write"}') is ToolResumePolicy.NEVER_RETRY
+    # Hook failures, wrong return types and invalid arguments all fail closed.
+    assert decided('{"mode":"boom"}') is ToolResumePolicy.REQUIRE_OPERATOR
+    assert decided('{"mode":"wrong-type"}') is ToolResumePolicy.REQUIRE_OPERATOR
+    assert decided('{"other":1}') is ToolResumePolicy.REQUIRE_OPERATOR
+    assert decided("{") is ToolResumePolicy.REQUIRE_OPERATOR
+
+    @tool
+    def plain(mode: str) -> str:
+        """A tool without a hook keeps its static policy."""
+
+        return mode
+
+    assert plain.has_call_resume_policy is False
+    assert plain.resume_policy_for(ToolCall("c", "plain", "{")) is ToolResumePolicy.REQUIRE_OPERATOR
+
+    with pytest.raises(ConfigurationError, match="call_resume_policy"):
+        tool(call_resume_policy="not callable")(plain._fn)  # type: ignore[arg-type]
