@@ -150,6 +150,11 @@ _MODEL_ATTRIBUTES = frozenset(
         "finish_reason",
         "outcome",
         "error_type",
+        "status_code",
+        "error_code",
+        "retryable",
+        "retry_exhausted",
+        "execution_attempt",
         "duration_s",
         "ttfc_s",
         "input_tokens",
@@ -307,6 +312,7 @@ class _ExecutionReference:
     span_key: tuple[str, str, str, str]
     span_context: Any | None = field(default=None, repr=False)
     trace_reference: TraceReference | None = field(default=None, repr=False)
+    execution_kind: str = "start"
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,6 +607,11 @@ class OTelTelemetry:
             "finish_reason": "gen_ai.response.finish_reasons",
             "outcome": "react_agent.outcome",
             "error_type": "error.type",
+            "status_code": "react_agent.model.status_code",
+            "error_code": "react_agent.model.error_code",
+            "retryable": "react_agent.model.retryable",
+            "retry_exhausted": "react_agent.model.retry_exhausted",
+            "execution_attempt": "react_agent.model.execution_attempt",
             "input_tokens": "gen_ai.usage.input_tokens",
             "output_tokens": "gen_ai.usage.output_tokens",
             "cached_input_tokens": "react_agent.usage.cached_input_tokens",
@@ -820,11 +831,22 @@ class OTelTelemetry:
         name, operation_name = self._span_name(scope, attributes)
         span_attributes = self._span_attributes(scope, attributes, operation_name)
         if scope == "run":
-            span_attributes["react_agent.execution.kind"] = (
-                "resume"
-                if event.kind is TelemetryEventKind.RUN_RESUMED
+            execution_kind = (
+                "resume" if event.kind is TelemetryEventKind.RUN_RESUMED else "start"
+            )
+        else:
+            # Tail-sampling policies decide shortly after the first span of a
+            # trace arrives, and the root span only arrives when the execution
+            # ends. Repeating the execution kind on every child span lets a
+            # "keep resumed executions" rule match a long run early.
+            with self._lock:
+                current = self._execution_references.get(key[1])
+            execution_kind = (
+                current.execution_kind
+                if current is not None and current.execution_id == key[2]
                 else "start"
             )
+        span_attributes["react_agent.execution.kind"] = execution_kind
         start_kwargs: dict[str, Any] = {
             "attributes": span_attributes,
             "start_time": event.timestamp_ns,
@@ -892,6 +914,7 @@ class OTelTelemetry:
                     span_key=key,
                     span_context=span_context,
                     trace_reference=trace_reference,
+                    execution_kind=execution_kind,
                 )
         return trace_reference
 

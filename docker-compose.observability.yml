@@ -14,6 +14,8 @@ services:
     command: [--config=/etc/otelcol-contrib/config.yaml]
     environment:
       GOMEMLIMIT: 220MiB
+      # 10 keeps production cost bounded; 100 keeps every trace of an evidence run.
+      WITNESS_OTEL_SUCCESS_SAMPLE_PERCENT: ${WITNESS_OTEL_SUCCESS_SAMPLE_PERCENT:-10}
     volumes:
       - ./deploy/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:

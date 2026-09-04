@@ -51,6 +51,7 @@ from react_agent.runtime import (
     StartRun,
 )
 from react_agent.supervisor import RunSupervisor
+from react_agent.telemetry import MetricCardinalityPolicy, create_telemetry
 from react_agent.workspace import GitWorktreeWorkspace
 
 ROOT = Path(os.environ["WITNESS_SWE_ROOT"]).resolve()
@@ -199,9 +200,18 @@ def build_workspace() -> GitWorktreeWorkspace:
 
 
 def build_runtime(agent: ReActAgent, journal: PostgresRunJournal) -> AgentRuntime:
+    # NoOp unless an OTel SDK/provider was initialised for this process
+    # (run.sh does that via opentelemetry-instrument when WITNESS_OTEL=1).
+    telemetry = create_telemetry(
+        cardinality=MetricCardinalityPolicy(
+            allowed_models=frozenset({MODEL_NAME}),
+            allowed_tools=frozenset(tool.name for tool in TOOLS),
+        )
+    )
     return AgentRuntime(
         agent,
         journal,
+        telemetry=telemetry,
         model_name=MODEL_NAME,
         workspace=build_workspace(),
         worker_id=WORKER_ID,

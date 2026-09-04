@@ -1142,3 +1142,97 @@ def test_privacy_canary_never_reaches_span_log_or_metric_exports() -> None:
     assert canary not in repr(span_export)
     assert canary not in repr(logger.records)
     assert canary not in repr(metric_export)
+
+
+def test_otel_model_failure_spans_carry_the_retry_classification() -> None:
+    tracer = FakeTracer()
+    adapter = OTelTelemetry(
+        tracer=tracer,
+        meter=FakeMeter(),
+        logger=FakeLogger(),
+        cardinality=MetricCardinalityPolicy(allowed_models=frozenset({"gpt-test"})),
+    )
+    common = {"run_id": "run-1", "execution_id": "exec-1", "provider": "openai"}
+    adapter.emit(TelemetryEvent(TelemetryEventKind.RUN_STARTED, common, timestamp_ns=1))
+    adapter.emit(
+        TelemetryEvent(
+            TelemetryEventKind.MODEL_STARTED,
+            {
+                **common,
+                "operation_id": "model-1",
+                "request_model": "gpt-test",
+                "step": 1,
+                "attempt": 2,
+            },
+            timestamp_ns=2,
+        )
+    )
+    adapter.emit(
+        TelemetryEvent(
+            TelemetryEventKind.MODEL_FAILED,
+            {
+                **common,
+                "operation_id": "model-1",
+                "request_model": "gpt-test",
+                "step": 1,
+                "attempt": 2,
+                "error_type": "ModelInvocationError",
+                "status_code": 429,
+                "error_code": "rate_limit_exceeded",
+                "retryable": True,
+                "retry_exhausted": False,
+                "execution_attempt": 2,
+                "error": "provider prose must not appear",
+                "error_param": "input[2].x",
+            },
+            timestamp_ns=3,
+        )
+    )
+
+    span = next(span for span in tracer.spans if span.name.startswith("chat"))
+    assert span.attributes["error.type"] == "ModelInvocationError"
+    assert span.attributes["react_agent.model.status_code"] == 429
+    assert span.attributes["react_agent.model.error_code"] == "rate_limit_exceeded"
+    assert span.attributes["react_agent.model.retryable"] is True
+    assert span.attributes["react_agent.model.retry_exhausted"] is False
+    assert span.attributes["react_agent.model.execution_attempt"] == 2
+    assert span.attributes["react_agent.attempt"] == 2
+    assert not any("prose" in str(value) for value in span.attributes.values())
+    assert not any("input[2]" in str(value) for value in span.attributes.values())
+
+
+def test_child_spans_repeat_the_execution_kind_for_tail_sampling() -> None:
+    tracer = FakeTracer()
+    adapter = OTelTelemetry(tracer=tracer, meter=FakeMeter(), logger=FakeLogger())
+    started = {"run_id": "run-1", "execution_id": "exec-1", "provider": "openai"}
+    adapter.emit(TelemetryEvent(TelemetryEventKind.RUN_STARTED, started, timestamp_ns=1))
+    adapter.emit(
+        TelemetryEvent(
+            TelemetryEventKind.TOOL_STARTED,
+            {**started, "operation_id": "tool-1", "tool_name": "probe", "call_key": "s1:t0"},
+            timestamp_ns=2,
+        )
+    )
+    resumed = {
+        "run_id": "run-1",
+        "execution_id": "exec-2",
+        "previous_execution_id": "exec-1",
+        "provider": "openai",
+    }
+    adapter.emit(TelemetryEvent(TelemetryEventKind.RUN_RESUMED, resumed, timestamp_ns=3))
+    adapter.emit(
+        TelemetryEvent(
+            TelemetryEventKind.MODEL_STARTED,
+            {**resumed, "operation_id": "model-2", "request_model": "gpt-test", "step": 2},
+            timestamp_ns=4,
+        )
+    )
+
+    assert [
+        (span.name, span.attributes["react_agent.execution.kind"]) for span in tracer.spans
+    ] == [
+        ("invoke_agent", "start"),
+        ("execute_tool probe", "start"),
+        ("invoke_agent", "resume"),
+        ("chat gpt-test", "resume"),
+    ]

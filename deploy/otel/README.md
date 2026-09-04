@@ -80,6 +80,21 @@ baseline sample. This is a single-Collector development example; a production
 multi-Collector deployment must route every span from one trace to the same
 tail-sampling Collector.
 
+Tail sampling decides `decision_wait` (5 s) after the *first* span of a trace
+arrives. In a 30-minute run that first span is an early `chat` or
+`execute_tool` span; the `invoke_agent` root only arrives when the execution
+ends, so a policy that keys on a root-only attribute would never match. The
+adapter therefore repeats `react_agent.execution.kind` on every child span, and
+a resumed execution starts a new trace (linked to the crashed one) whose first
+span already says `resume`. Errors are kept the same way: the failing `chat`
+span carries the ERROR status itself. Unremarkable successful traces are
+sampled at `WITNESS_OTEL_SUCCESS_SAMPLE_PERCENT` (default 10); set it to 100 on
+the Collector container when you need every trace of an evidence run:
+
+```bash
+WITNESS_OTEL_SUCCESS_SAMPLE_PERCENT=100 docker compose -f docker-compose.observability.yml up -d
+```
+
 Prompt text, system instructions, tool arguments/results, reasoning, opaque
 provider state, and credentials are not exported. Identifiers such as
 `run_id`, `request_id`, and `tool_call_id` may correlate spans and logs but are
