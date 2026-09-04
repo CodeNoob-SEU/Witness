@@ -15,7 +15,19 @@
   `ruff check`、`mypy src/react_agent`（strict）干净。
 - 所有改动**尚未提交**。建议拆三个 commit（见 §2）。
 
-## 1. 本次改动（未提交）
+## 0.5 合并状态（2026-09-04 晚补记）
+
+本地线与 `origin/main`（console 重建、evals、chaos/fencing 示例、真实 PostgreSQL CI）已合并，
+合并提交 `4f37d44`，已推送。两点后续要处理：
+
+- **两套工作区工具并存**：`workspace_tools.py`（3 个，离线 demo / evals / console 标签在用）与
+  `repo_tools.py`（7 个，env 驱动的 Web 与 SWE-bench harness 在用）。应统一到 `repo_tools`，
+  需要同步改 `demo.py`、`evals.py` 的 scripted model、`static/assets/js/projection.js` 标签、
+  `tests/test_workspace_tools*.py`、`tests/test_demo_fixture.py`、DESIGN.md 与 README。
+- 合并时顺手修的：CI 安装 `debug` extra；pytest `pythonpath=["."]`；debugger 测试与 demo 的
+  `ps` 改为 `-axww`（procps 截断长命令行导致 Linux 上找不到 debuggee marker）。
+
+## 1. 本次改动（已提交，分四个 commit + 一个合并提交）
 
 | 文件 | 变更 |
 | --- | --- |
