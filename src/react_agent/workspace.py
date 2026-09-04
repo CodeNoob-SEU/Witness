@@ -307,9 +307,28 @@ class GitWorktreeWorkspace:
         allowed_roots: Sequence[Path] | None = None,
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
         sensitive_patterns: Sequence[str] | None = None,
+        seed_paths: Sequence[str] = (),
+        seed_command: str | None = None,
+        seed_timeout_s: float = 300.0,
     ) -> None:
+        """``seed_paths`` / ``seed_command`` restore environment a worktree lacks.
+
+        ``git worktree add`` materializes tracked files only. Generated,
+        gitignored inputs the task needs (a ``_version.py`` from
+        setuptools_scm, a vendored data file) can be listed in ``seed_paths``
+        as repository-relative paths and are copied from the primary
+        repository into every new worktree. ``seed_command`` runs once in the
+        new worktree afterwards (e.g. ``pip install -e .``). Seeded content is
+        ignored by Git, so it never enters a checkpoint or a patch; a seed
+        that produces sensitive or escaping files fails creation closed.
+        """
+
         if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be positive")
+        if seed_timeout_s <= 0:
+            raise ValueError("seed_timeout_s must be positive")
+        if seed_command is not None and not seed_command.strip():
+            raise ValueError("seed_command must not be blank")
 
         try:
             repository_candidate = repository.expanduser().resolve(strict=True)
@@ -352,6 +371,9 @@ class GitWorktreeWorkspace:
         self._allowed_roots = roots
         self._common_git_dir = common_path.resolve(strict=True)
         self._max_file_bytes = max_file_bytes
+        self._seed_paths = tuple(_safe_relative_path(value) for value in seed_paths)
+        self._seed_command = seed_command
+        self._seed_timeout_s = seed_timeout_s
         self._sensitive_patterns = tuple(
             sensitive_patterns
             if sensitive_patterns is not None
@@ -394,6 +416,7 @@ class GitWorktreeWorkspace:
                     path=target,
                     baseline_revision=baseline,
                 )
+                self._seed_worktree(target)
                 self._validate_worktree(handle)
             except Exception:
                 self._discard_unregistered_worktree(target)
@@ -588,6 +611,7 @@ class GitWorktreeWorkspace:
                     path=target,
                     baseline_revision=checkpoint.commit_id,
                 )
+                self._seed_worktree(target)
                 self._validate_worktree(handle)
             except Exception:
                 self._discard_unregistered_worktree(target)
@@ -704,6 +728,63 @@ class GitWorktreeWorkspace:
         if common_path.resolve(strict=True) != self._common_git_dir:
             raise WorkspaceSafetyError("worktree belongs to a different Git repository")
         self._validate_contents(handle.path)
+
+    def _seed_worktree(self, target: Path) -> None:
+        """Copy declared ignored inputs, then run the seed command, in a new worktree."""
+
+        for relative in self._seed_paths:
+            source = self._repository / relative
+            if source.is_symlink() or not source.exists():
+                raise WorkspaceSafetyError(f"seed path is missing or a symlink: {relative}")
+            if _is_sensitive(relative, self._sensitive_patterns):
+                raise WorkspaceSafetyError(f"seed path matches a sensitive pattern: {relative}")
+            # A directory pattern such as "build/" only matches with the slash.
+            if not self._is_ignored(target, relative + "/" if source.is_dir() else relative):
+                # Tracked content is already in the worktree; copying the
+                # primary repository's copy over it would smuggle in edits.
+                raise WorkspaceSafetyError(f"seed path is not ignored by Git: {relative}")
+            destination = target / relative
+            if destination.exists() or destination.is_symlink():
+                raise WorkspaceSafetyError(f"seed path already exists in the worktree: {relative}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if source.is_dir():
+                    shutil.copytree(source, destination, symlinks=True)
+                else:
+                    shutil.copy2(source, destination)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"seed path could not be copied: {relative} ({type(exc).__name__})"
+                ) from exc
+        if self._seed_command is None:
+            return
+        environment = os.environ.copy()
+        for name in _UNTRUSTED_GIT_ENV:
+            environment.pop(name, None)
+        try:
+            completed = subprocess.run(
+                self._seed_command,
+                shell=True,
+                cwd=str(target),
+                env=environment,
+                capture_output=True,
+                check=False,
+                timeout=self._seed_timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise WorkspaceError("seed command timed out") from exc
+        except OSError as exc:
+            raise WorkspaceError(f"seed command could not run: {type(exc).__name__}") from exc
+        if completed.returncode != 0:
+            raise WorkspaceError(f"seed command failed with exit code {completed.returncode}")
+
+    @staticmethod
+    def _is_ignored(worktree: Path, relative: str) -> bool:
+        try:
+            _run_git(worktree, "check-ignore", "-q", "--", relative)
+        except WorkspaceError:
+            return False
+        return True
 
     def _validate_contents(self, root: Path) -> None:
         root_resolved = root.resolve(strict=True)

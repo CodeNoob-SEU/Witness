@@ -384,6 +384,8 @@ python examples/quickstart.py
 | `REACT_AGENT_REPOSITORY` | 否，成对 | 要隔离操作的 non-bare Git worktree。必须与 `REACT_AGENT_WORKTREE_ROOT` 同时设置。 |
 | `REACT_AGENT_WORKTREE_ROOT` | 否，成对 | Session worktree 的独立 managed root；不能与 repository 互相包含。 |
 | `REACT_AGENT_COMMAND_APPROVAL` | 否 | `true` 时 Web 工作台的 `run_command` 需要审批；仅在配置了仓库 worktree 时生效。 |
+| `REACT_AGENT_WORKSPACE_SEED_PATHS` | 否 | 逗号分隔、仓库相对的**被忽略**路径，创建 worktree 时从主仓库复制进去（如 `src/_pytest/_version.py`）。 |
+| `REACT_AGENT_WORKSPACE_SEED_COMMAND` | 否 | 每个新 worktree 创建后在其中执行一次的命令；失败则拒绝创建。 |
 | `REACT_AGENT_SUPERVISOR` | 否 | `true` 时 Web 进程内运行 `RunSupervisor`：定期把 lease 已过期的非终态 run `ResumeRun`，`GET /api/supervisor` 查看最近一次 sweep。 |
 | `REACT_AGENT_SUPERVISOR_INTERVAL_S` | 否 | Supervisor 的 sweep 间隔，默认 `5`。 |
 | `REACT_AGENT_CONTEXT_STRATEGY` | 否 | Web Runtime 的上下文策略：`tiered`（默认）、`generic` 或 `stop`。 |
@@ -517,8 +519,20 @@ Web 工作台在同时设置 `REACT_AGENT_REPOSITORY` 与 `REACT_AGENT_WORKTREE_
 工具并切换到仓库任务的预算（60 步 / 200 次工具调用 / 1 小时）；否则只保留本地计算器。
 
 一个已知边界：worktree 只包含 Git 跟踪的文件。被 `.gitignore` 忽略的生成物（例如 setuptools_scm
-写出的 `_version.py`、`.venv`、构建产物）不会出现在隔离 worktree 中，需要由部署方在主仓库提交或由
-`CommandRunner` 的镜像提供。
+写出的 `_version.py`、构建产物）不会出现在隔离 worktree 中。`GitWorktreeWorkspace(seed_paths=...,
+seed_command=...)`（Web 对应 `REACT_AGENT_WORKSPACE_SEED_PATHS` / `REACT_AGENT_WORKSPACE_SEED_COMMAND`）
+会在每个新 worktree（`create` 与 `fork`）里从主仓库复制这些被忽略的路径，再执行一次 seed 命令：
+
+```python
+workspace = GitWorktreeWorkspace(
+    repo, managed_root,
+    seed_paths=("src/_pytest/_version.py",),   # 必须是被 Git 忽略的路径；跟踪文件、符号链接、敏感文件都会被拒绝
+    seed_command="pip install -e . --no-deps",  # 在新 worktree 里执行；失败则整个 worktree 被丢弃
+)
+```
+
+被复制的内容仍被 Git 忽略，因此不会进入 checkpoint 或 patch。`.venv` 这类含有指向仓库外符号链接的目录
+不能这样播种（worktree 校验拒绝逃逸链接），工具链应由 `CommandRunner` 的镜像提供。
 
 ## 审批高风险工具
 

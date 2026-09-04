@@ -298,3 +298,65 @@ def test_baseline_with_escaping_symlink_is_rejected_without_touching_primary(
         git(repository, "status", "--porcelain=v1", "--untracked-files=all"),
         os.readlink(repository / "escape"),
     ) == before
+
+
+def test_seed_paths_and_command_restore_ignored_environment(
+    repository: Path, tmp_path: Path
+) -> None:
+    (repository / "ignored.txt").write_text("generated 1.2.3\n", encoding="utf-8")
+    (repository / "ignored-dir").mkdir()
+    (repository / "ignored-dir" / "data.bin").write_bytes(b"\x00\x01")
+    store = GitWorktreeWorkspace(
+        repository,
+        tmp_path / "managed",
+        seed_paths=("ignored.txt", "ignored-dir"),
+        seed_command="printf seeded > seed-marker.txt",
+    )
+
+    handle = store.create("seeded")
+    assert (handle.path / "ignored.txt").read_text(encoding="utf-8") == "generated 1.2.3\n"
+    assert (handle.path / "ignored-dir" / "data.bin").read_bytes() == b"\x00\x01"
+    assert (handle.path / "seed-marker.txt").read_text(encoding="utf-8") == "seeded"
+
+    # Seeded ignored content is environment, not a change: it never reaches a
+    # checkpoint. The seed command's untracked output does, like any edit.
+    checkpoint = store.checkpoint("seeded")
+    assert "ignored.txt" not in checkpoint.diff.paths
+    assert "seed-marker.txt" in checkpoint.diff.paths
+
+    forked = store.fork(checkpoint, "seeded-fork")
+    assert (forked.path / "ignored.txt").exists()
+    assert (forked.path / "ignored-dir" / "data.bin").exists()
+
+
+def test_seed_refuses_tracked_missing_sensitive_or_failing_inputs(
+    repository: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(WorkspaceSafetyError, match="unsafe workspace-relative"):
+        GitWorktreeWorkspace(repository, tmp_path / "m0", seed_paths=("../outside",))
+    with pytest.raises(ValueError):
+        GitWorktreeWorkspace(repository, tmp_path / "m0", seed_command="   ")
+
+    # A tracked file is already in the worktree; copying over it is refused.
+    tracked = GitWorktreeWorkspace(repository, tmp_path / "m1", seed_paths=("README.md",))
+    with pytest.raises(WorkspaceSafetyError, match="not ignored"):
+        tracked.create("s1")
+    assert not (tmp_path / "m1" / "s1").exists()
+
+    missing = GitWorktreeWorkspace(repository, tmp_path / "m2", seed_paths=("ignored.txt",))
+    with pytest.raises(WorkspaceSafetyError, match="missing"):
+        missing.create("s2")
+
+    (repository / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (repository / ".gitignore").write_text("ignored.txt\nignored-dir/\n.env\n", encoding="utf-8")
+    git(repository, "commit", "--quiet", "-am", "ignore env")
+    secret = GitWorktreeWorkspace(repository, tmp_path / "m3", seed_paths=(".env",))
+    with pytest.raises(WorkspaceSafetyError, match="sensitive"):
+        secret.create("s3")
+
+    failing = GitWorktreeWorkspace(repository, tmp_path / "m4", seed_command="exit 3")
+    with pytest.raises(Exception, match="exit code 3"):
+        failing.create("s4")
+    # A failed seed discards the half-built worktree entirely.
+    assert not (tmp_path / "m4" / "s4").exists()
+    assert "s4" not in git(repository, "worktree", "list")

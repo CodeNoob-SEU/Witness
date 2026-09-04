@@ -564,8 +564,16 @@ def _build_workspace_from_env() -> WorkspaceCheckpointStore | None:
         raise RuntimeError(
             "REACT_AGENT_REPOSITORY and REACT_AGENT_WORKTREE_ROOT must be set together."
         )
+    raw_seed_paths = _optional_env("REACT_AGENT_WORKSPACE_SEED_PATHS") or ""
+    seed_paths = tuple(item.strip() for item in raw_seed_paths.split(",") if item.strip())
+    seed_command = _optional_env("REACT_AGENT_WORKSPACE_SEED_COMMAND")
     try:
-        return GitWorktreeWorkspace(Path(repository), Path(managed_root))
+        return GitWorktreeWorkspace(
+            Path(repository),
+            Path(managed_root),
+            seed_paths=seed_paths,
+            seed_command=seed_command,
+        )
     except Exception:
         # Git errors can include deployment paths. Keep the startup diagnostic
         # useful without reflecting local layout into logs or HTTP responses.
