@@ -146,6 +146,24 @@ def _chat_tool(spec: ToolSpec, *, strict_tools: bool) -> dict[str, Any]:
     return {"type": "function", "function": function}
 
 
+def _wire_output_item(item: Any) -> Mapping[str, Any]:
+    """Serialize one output item exactly as the provider emitted it.
+
+    ``responses.stream()`` hands back ``ParsedResponse`` items whose
+    ``parsed_arguments`` / ``parsed`` fields exist only client-side; replaying
+    them in ``input`` is rejected by the API as an unknown parameter.
+    """
+
+    payload = cast(dict[str, Any], item.model_dump(mode="json", exclude_none=True))
+    payload.pop("parsed_arguments", None)
+    content = payload.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part.pop("parsed", None)
+    return payload
+
+
 def _parse_responses_response(response: Any) -> ModelResponse:
     """Normalize one fully accumulated Responses API response."""
 
@@ -156,10 +174,7 @@ def _parse_responses_response(response: Any) -> ModelResponse:
         suffix = f" (code={error_code})" if error_code else ""
         raise ModelInvocationError(f"Responses request did not complete{suffix}.")
 
-    raw_items = tuple(
-        cast(Mapping[str, Any], item.model_dump(mode="json", exclude_none=True))
-        for item in response.output
-    )
+    raw_items = tuple(_wire_output_item(item) for item in response.output)
     calls: list[ToolCall] = []
     has_incomplete_call = False
     for item in response.output:

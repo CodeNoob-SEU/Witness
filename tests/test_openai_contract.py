@@ -696,6 +696,11 @@ async def test_responses_stream_emits_text_and_tool_deltas_from_typed_events() -
     assert response.message.content == "正在查询"
     assert response.message.tool_calls == (ToolCall("call-next", "get_weather", '{"city":"广州"}'),)
     assert response.usage.total_tokens == 27
+    # Replayed items must be exactly what the provider emitted. The SDK's stream
+    # accumulator decorates strict function calls with client-only
+    # ``parsed_arguments`` (and text parts with ``parsed``), which providers
+    # reject as unknown parameters when the history is sent back.
+    assert response.message.raw_items == (final_message, final_call)
 
 
 @pytest.mark.asyncio
