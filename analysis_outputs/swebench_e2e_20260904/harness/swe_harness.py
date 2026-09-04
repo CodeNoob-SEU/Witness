@@ -180,11 +180,30 @@ def build_model() -> OpenAIModel:
     )
 
 
+COMPRESSION_MODEL = os.environ.get("WITNESS_COMPRESSION_MODEL")
+
+
+def build_compression_model(api_key: str) -> OpenAIModel | None:
+    """A cheaper, non-reasoning model for the notes form; None reuses the main model."""
+
+    if not COMPRESSION_MODEL:
+        return None
+    return OpenAIModel(
+        COMPRESSION_MODEL,
+        api_mode=API_MODE,  # type: ignore[arg-type]
+        api_key=api_key,
+        base_url=BASE_URL,
+        timeout=300.0,
+        max_retries=2,
+    )
+
+
 def build_agent(model: OpenAIModel) -> ReActAgent:
     SUMMARIES.mkdir(parents=True, exist_ok=True)
+    compression_model = build_compression_model(os.environ["OPENAI_API_KEY"])
     governor = ContextGovernor(
         strategy=ContextStrategy.TIERED,
-        compressor=ModelContextCompressor(model),
+        compressor=ModelContextCompressor(compression_model or model),
         store=FileContextSummaryStore(SUMMARIES),
         keep_recent_turns=CONFIG.context_keep_recent_turns,
         max_summary_chars=CONFIG.context_summary_max_chars,

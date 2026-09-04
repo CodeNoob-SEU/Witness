@@ -1,0 +1,19 @@
+{
+ "run_id": "bd04f7b3426e4a60b54f539871303e53",
+ "hard_limit": 60000,
+ "compressor": "fake",
+ "model": null,
+ "steps": 40,
+ "steps_over_budget": 35,
+ "compression_calls": 35,
+ "cache_hits": 0,
+ "hard_fallbacks": 0,
+ "overflows": 0,
+ "errors": 0,
+ "source_chars_max": 35543,
+ "source_chars_mean": 5858.6,
+ "final_chars_max": 56052,
+ "compression_seconds_total": 0.1,
+ "compression_seconds_mean": 0.0,
+ "compression_tokens_total": 70
+}

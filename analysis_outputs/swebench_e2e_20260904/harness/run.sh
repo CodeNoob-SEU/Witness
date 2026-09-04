@@ -10,6 +10,10 @@ export WITNESS_REASONING_EFFORT="${WITNESS_REASONING_EFFORT:-high}"
 set -a; source "$HOME/witness-swebench/.secrets.env"; set +a
 cd "$WITNESS_SWE_ROOT/witness"
 export PATH="$HOME/.local/bin:$PATH"
+if [[ "${1:-}" == "replay-context" ]]; then
+  shift
+  exec uv run --extra dev --extra debug python "$WITNESS_SWE_ROOT/harness/replay_context.py" "$@"
+fi
 if [[ "${WITNESS_OTEL:-0}" == "1" ]]; then
   # Export to the local Collector (docker-compose.observability.yml). The
   # adapter's allowlist keeps prompts, tool arguments/results and reasoning out.

@@ -75,3 +75,34 @@ again 30 s later when the provider was still down).
   single-span traces rather than children of `chat`, because the adapter starts spans without
   activating them as the current context. They carry only method/URL/status and are excluded from
   the exported `jaeger_traces.json`.
+
+## Tier 2 redesign, replayed offline on the 60k run (`replay_tier2_working_state/`)
+
+The 60k run above is also the test bed for the form-style working state (`0fca6cd`). The
+per-step canonical transcripts are in that run's `checkpoint(phase=before_model)` facts, so
+`harness/replay_context.py` re-runs `ContextGovernor.prepare` on all 40 of them with the same
+60,000-char budget — identical inputs, only the governor differs. `replay_60k_fake/` uses a
+deterministic notes stub (measures the algorithm), `replay_60k_gpt54mini/` uses `gpt-5.4-mini` as
+the notes model (measures latency and form quality; every rendered form is in `replay_forms.json`).
+
+| | old prose Tier 2 (live run, gpt-5.5) | working state, replay (gpt-5.4-mini) |
+| --- | --- | --- |
+| compression calls over 40 steps | 44 | 35 (one per step over budget) |
+| chars sent per compression | 35k at step 6 → **202k** at step 40 (whole raw prefix, every step) | mean **5.9k**, max 35.5k (first fold only); e.g. 614 at step 33 |
+| seconds per compression | **104** mean | **7.3** mean |
+| compression wall time | 64 min | 4.2 min |
+| compression tokens | (dominant share of 1.76M input) | 75k total |
+| hard fallbacks | 38 (recent tool outputs blanked) | **0** |
+| final projected chars | 34k–54k | 23k–56k |
+| cache hits on identical prefix | never (key changed every step) | by construction (chain hash; see tests) |
+
+What the form looks like at step 40 (`replay_60k_gpt54mini/replay_forms.json`): the verbatim
+goal; a ledger that says, mechanically, `read_file src/_pytest/skipping.py […] x26`,
+`run_tests args=testing/test_skipping.py -q: exit 0`; and notes with four findings, a hypothesis,
+four next steps and three open questions, all checkable against the transcript. The `x26` is itself
+a diagnosis of the old design: with recent reads blanked by the hard fallback, the model re-read
+the same file twenty-six times.
+
+Caveat: this replays the *inputs* of the old run; a model steering with the new form would have
+produced a different trajectory. A live 60k run with the new Tier 2 is the remaining experiment,
+and it is now cheap enough to be worth it.

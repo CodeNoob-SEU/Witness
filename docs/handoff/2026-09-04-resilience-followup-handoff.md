@@ -78,6 +78,23 @@
 - server3 上 `~/witness-swebench/harness/run.sh` 多了 `WITNESS_OTEL=1` 开关；观测栈用 `--restart unless-stopped` 常驻。
   WSL keepalive 的 ssh 中途断过一次（exit 255）——用 `-o ServerAliveCountMax=6` 重开后没再断，但它仍是单点，长任务前先看它活着。
 
+## 2.6 傍晚补记：Tier 2 重做成填表式滚动工作状态（commit `0fca6cd`）
+
+用户看了 60k 数据后指出两点：压缩每步从头重压整段历史不对；这个场景要的是填表式摘要，不是散文。重做后：
+
+- `working_state.py`：**goal**（首条用户消息原样）+ **ledger**（读/改/跑 + 结果，框架按 `ToolContextPolicy` 从
+  transcript 机械生成，零模型调用）+ **notes**（findings/hypothesis/next_steps/open_questions，每格硬上限，模型只做
+  "旧表 + 新增几轮 → 新表"的增量更新，工具输出先截成预览）。
+- 状态沿 turn-group 边界对 canonical transcript 做链式哈希；任何进程从 store 找最新一份 notes 接着折，同一前缀不重压。
+  `ContextCompressor.compress(request)` seam 不变，request 多了 `previous_summary` / `ledger`。没配 compressor 或
+  压缩失败时机械表单照常替换前缀。hard fallback 先把旧轮次工具输出降为预览再抹。`CONTEXT_ALGORITHM_VERSION=working-state-v5`。
+- 离线回放证据（同一 60k run 的 40 个 step transcript，`analysis_outputs/.../replay_tier2_working_state/`）：
+  每次压缩输入 5.9k 字符（旧 35k→202k）、`gpt-5.4-mini` 平均 **7.3 s**（旧 gpt-5.5 104 s）、hard fallback **0**（旧 38）。
+  harness 新增 `WITNESS_COMPRESSION_MODEL`（推荐 `gpt-5.4-mini`）和 `run.sh replay-context`。
+- 还没做：用新 Tier 2 **真跑**一次 60k（现在便宜了，一条命令：`WITNESS_COMPRESSION_MODEL=gpt-5.4-mini
+  WITNESS_MAX_CONTEXT_CHARS=60000 harness/run.sh start ...`）；`search_text` 的 `ToolContextPolicy` 仍是 OPAQUE，ledger 里
+  只显示次数不显示 pattern。
+
 ## 3. 没做的（按优先级）
 
 1. ~~Tier 2 压测~~ 已做，见 §2.5。
