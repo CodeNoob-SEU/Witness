@@ -322,3 +322,53 @@ async def test_legacy_terminal_model_failure_still_recovers_as_terminal() -> Non
     assert completed.status == "failed"
     assert completed.stop_reason == "model_error"
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_model_abandoned_does_not_burn_a_step() -> None:
+    """A model attempt interrupted by a crash is retried at the same step."""
+
+    journal = InMemoryRunJournal()
+    store = InMemoryRuntimeStore()
+    config = AgentConfig(max_steps=2)
+    blocked = asyncio.Event()
+
+    class CrashDuringSecondCall:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    AssistantMessage(tool_calls=(ToolCall("call-1", "probe", '{"label":"a"}'),))
+                )
+            blocked.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    first_runtime = AgentRuntime(
+        ReActAgent(CrashDuringSecondCall(), [probe], config=config), journal, store=store
+    )
+    handle = await first_runtime.submit(
+        StartRun(prompt="two steps", session_id="abandon", idempotency_key="request")
+    )
+    await asyncio.wait_for(blocked.wait(), timeout=1)
+    await first_runtime.close()
+
+    second_model = FlakyModel(answer("finished"))
+    second_runtime = AgentRuntime(
+        ReActAgent(second_model, [probe], config=config), journal, store=store
+    )
+    await second_runtime.submit(ResumeRun(run_id=handle.run_id))
+    completed = await second_runtime.wait(handle.run_id, timeout_s=2)
+
+    assert completed.state is RunState.TERMINAL
+    assert completed.status == "completed"
+    assert completed.stop_reason == "completed"
+    events = await journal.read(handle.run_id)
+    assert any(event.kind is RunEventKind.MODEL_ABANDONED and event.step == 2 for event in events)
+    resumed_start = [event for event in events if event.kind is RunEventKind.MODEL_STARTED][-1]
+    assert resumed_start.step == 2
+    assert resumed_start.data["attempt"] == 2
+    await second_runtime.close()

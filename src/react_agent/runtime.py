@@ -3360,7 +3360,7 @@ class AgentRuntime:
             await self._finalize(writer, recovered_terminal)
             return
 
-        resume_state = await self._build_resume_state(writer, durable_history)
+        resume_state = await self._build_resume_state(writer)
         if resume_state is None:
             raise ResumeRejected(
                 "durable facts do not identify a terminal result or safe continuation"
@@ -3396,6 +3396,27 @@ class AgentRuntime:
         ):
             return None
         return cause.step
+
+    @staticmethod
+    def _interrupted_model_step(events: Sequence[StoredRunEvent]) -> int | None:
+        """Step whose model attempt never produced a completion.
+
+        Both a retryable ``model_failed`` and a ``model_abandoned`` written by
+        Resume leave that step undecided; the new attempt belongs to the same
+        step, so an interruption never consumes step budget.
+        """
+
+        cause = _last_progress_event(events)
+        if cause is None:
+            return None
+        if cause.kind is RunEventKind.MODEL_ABANDONED:
+            return cause.step
+        if (
+            cause.kind is RunEventKind.MODEL_FAILED
+            and cause.data.get("terminal_decision") is False
+        ):
+            return cause.step
+        return None
 
     @staticmethod
     def _recover_pre_result_terminal(
@@ -3569,14 +3590,13 @@ class AgentRuntime:
             error=resolved_error,
         )
 
-    async def _build_resume_state(
-        self,
-        writer: _JournalWriter,
-        durable_history: Sequence[StoredRunEvent],
-    ) -> AgentResumeState | None:
+    async def _build_resume_state(self, writer: _JournalWriter) -> AgentResumeState | None:
         snapshot = await self.load(writer.run_id)
         transcript = transcript_from_json(snapshot.transcript)
-        retry_step = self._transient_model_failure_step(durable_history)
+        # Read after this Resume's own abandonment facts were appended.
+        retry_step = self._interrupted_model_step(
+            await self.journal.read(writer.run_id, after_sequence=0)
+        )
         completed: list[RecoveredToolCall] = []
         for tool in snapshot.tools.values():
             if tool.call is None or tool.message is None:
@@ -3643,8 +3663,8 @@ class AgentRuntime:
             isinstance(item, ToolMessage) for item in transcript[last_assistant_index + 1 :]
         )
         if has_tool_messages:
-            # A transient model failure at step N is retried at step N; only a
-            # completed model turn advances the step budget.
+            # An interrupted model attempt at step N is retried at step N;
+            # only a completed model turn advances the step budget.
             return AgentResumeState(
                 transcript,
                 retry_step if retry_step is not None else max(1, snapshot.last_step + 1),

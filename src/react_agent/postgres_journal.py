@@ -357,7 +357,10 @@ class PostgresRunJournal:
     async def migrate(self) -> None:
         """Apply bundled idempotent migrations in lexical order."""
 
-        migration_paths = sorted(_MIGRATIONS_DIR.glob("*.sql"))
+        # macOS archives ship "._*.sql" AppleDouble sidecars; they are not SQL.
+        migration_paths = sorted(
+            path for path in _MIGRATIONS_DIR.glob("*.sql") if not path.name.startswith(".")
+        )
         if not migration_paths:
             raise RuntimeError(f"No migrations found in {_MIGRATIONS_DIR}")
         async with self._pool.connection() as connection:

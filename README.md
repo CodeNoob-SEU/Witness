@@ -1037,7 +1037,7 @@ Runtime SSE 明确区分两类事件：
 
 | 中断状态 | Resume 行为 |
 | --- | --- |
-| 模型调用已开始但未提交完成 | 写入 `model_abandoned`，将该次成本记为未知，再发起新的模型 attempt。 |
+| 模型调用已开始但未提交完成 | 写入 `model_abandoned`，将该次成本记为未知，再对**同一 step** 发起新的模型 attempt（不消耗 step 预算）。 |
 | 最后一条事实是 `model_failed(terminal_decision=false)`（瞬时错误重试耗尽） | 不是终态。`resume_reason=model_retry`，从同一 step 发起新 attempt，不消耗 step 预算。 |
 | 旧 worker 被 kill，lease 尚未过期 | `RuntimeConflict("the run already has a live writer lease")`；调用方需等待 `lease_ttl_s`（默认 30 s）后再 Resume。 |
 | 压缩已开始但无 terminal fact | 写入 compression `abandoned`；若内容寻址 summary 已落盘则复用，否则再压缩。 |
