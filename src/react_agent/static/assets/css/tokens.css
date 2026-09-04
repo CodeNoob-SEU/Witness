@@ -1,0 +1,138 @@
+/* Design tokens.
+ *
+ * Dark-first, because this console's subject is an audit trail and the
+ * vocabulary it borrows from — Linear, Sentry, Datadog — reads as
+ * infrastructure rather than as a consumer product.
+ *
+ * Colour carries meaning here and nothing else: the interface is ~90% neutral,
+ * and a hue appears only when it says something (verified / running / degraded
+ * / rejected). Anything decorative stays grey.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, coolest to warmest. */
+  --bg: #0d1013;
+  --surface: #14181c;
+  --surface-raised: #1a1f25;
+  --surface-sunken: #0a0d0f;
+  --surface-hover: #1f252c;
+  --surface-active: #252d35;
+
+  /* Hairlines do the layering work that shadows would in a softer design. */
+  --line: #242a31;
+  --line-strong: #333c45;
+  --line-focus: #3fae8c;
+
+  --text: #e3e8ec;
+  --text-muted: #97a3ae;
+  --text-faint: #67727d;
+  --text-inverse: #0a0d0f;
+
+  /* Brand: carried forward from the original green, deepened for dark. */
+  --accent: #3fae8c;
+  --accent-strong: #4ec49e;
+  --accent-dim: rgba(63, 174, 140, 0.14);
+  --accent-line: rgba(63, 174, 140, 0.38);
+
+  /* Semantic states. */
+  --ok: #3fb950;
+  --ok-dim: rgba(63, 185, 80, 0.13);
+  --run: #4a9eff;
+  --run-dim: rgba(74, 158, 255, 0.13);
+  --warn: #d9a441;
+  --warn-dim: rgba(217, 164, 65, 0.13);
+  --bad: #f0603d;
+  --bad-dim: rgba(240, 96, 61, 0.13);
+
+  /* Diff. Deliberately dimmer than the state colours: a diff is the substrate,
+     not an alert. */
+  --diff-add-bg: rgba(63, 185, 80, 0.11);
+  --diff-add-line: rgba(63, 185, 80, 0.34);
+  --diff-del-bg: rgba(240, 96, 61, 0.10);
+  --diff-del-line: rgba(240, 96, 61, 0.32);
+  --diff-gutter: #1a1f25;
+
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* One dense scale. 13px chrome / 12px data is the density these tools use. */
+  --fs-xs: 10.5px;
+  --fs-sm: 11.5px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-code: 12px;
+
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 28px;
+  --sp-9: 40px;
+
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  --rail-w: 60px;
+  --col-left-w: 268px;
+  --col-right-w: 340px;
+  --topbar-h: 44px;
+
+  --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Light theme is a token swap, not a second stylesheet. Kept because an
+ * audit console is sometimes read in a bright room or printed from. */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f6f5;
+  --surface: #ffffff;
+  --surface-raised: #f8faf9;
+  --surface-sunken: #eef1f0;
+  --surface-hover: #eff3f1;
+  --surface-active: #e5eae7;
+
+  --line: #dfe4e1;
+  --line-strong: #c2ccc6;
+
+  --text: #16231b;
+  --text-muted: #5b6a61;
+  --text-faint: #85918a;
+  --text-inverse: #ffffff;
+
+  --accent: #1f7a5c;
+  --accent-strong: #17624a;
+  --accent-dim: rgba(31, 122, 92, 0.10);
+  --accent-line: rgba(31, 122, 92, 0.30);
+
+  --ok: #1a7f37;
+  --ok-dim: rgba(26, 127, 55, 0.10);
+  --run: #1f6feb;
+  --run-dim: rgba(31, 111, 235, 0.10);
+  --warn: #9a6700;
+  --warn-dim: rgba(154, 103, 0, 0.10);
+  --bad: #c2412d;
+  --bad-dim: rgba(194, 65, 45, 0.10);
+
+  --diff-add-bg: rgba(26, 127, 55, 0.09);
+  --diff-add-line: rgba(26, 127, 55, 0.30);
+  --diff-del-bg: rgba(194, 65, 45, 0.08);
+  --diff-del-line: rgba(194, 65, 45, 0.28);
+  --diff-gutter: #f2f5f3;
+
+  --shadow-pop: 0 8px 28px rgba(20, 40, 30, 0.14);
+}

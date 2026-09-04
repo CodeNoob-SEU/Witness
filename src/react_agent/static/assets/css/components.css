@@ -1,0 +1,701 @@
+/* Components. Ordered roughly by how often they appear. */
+
+/* -- Buttons ------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: 5px var(--sp-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 110ms var(--ease), border-color 110ms var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--text-faint);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.btn-sm {
+  padding: 2px var(--sp-4);
+  font-size: var(--fs-xs);
+}
+
+/* -- Badges and dots ----------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 1px var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.badge-ok { color: var(--ok); border-color: var(--ok); background: var(--ok-dim); }
+.badge-run { color: var(--run); border-color: var(--run); background: var(--run-dim); }
+.badge-warn { color: var(--warn); border-color: var(--warn); background: var(--warn-dim); }
+.badge-bad { color: var(--bad); border-color: var(--bad); background: var(--bad-dim); }
+.badge-accent {
+  color: var(--accent-strong);
+  border-color: var(--accent-line);
+  background: var(--accent-dim);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+.dot-ok { background: var(--ok); }
+.dot-run { background: var(--run); }
+.dot-warn { background: var(--warn); }
+.dot-bad { background: var(--bad); }
+
+.dot-pulse {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* -- Metric strip -------------------------------------------------------- */
+
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.metric {
+  flex: 1 1 0;
+  min-width: 84px;
+  padding: var(--sp-4) var(--sp-5);
+  border-right: 1px solid var(--line);
+}
+
+.metric:last-child {
+  border-right: 0;
+}
+
+.metric-label {
+  display: block;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.metric-value {
+  display: block;
+  margin-top: 1px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* -- Tables -------------------------------------------------------------- */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--sp-3) var(--sp-5);
+  text-align: left;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.table tbody tr {
+  cursor: pointer;
+  transition: background 90ms var(--ease);
+}
+
+.table tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.table tbody tr[aria-selected="true"] {
+  background: var(--accent-dim);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.table .num-cell {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* -- Cards / list rows --------------------------------------------------- */
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.card + .card {
+  margin-top: var(--sp-5);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.card-body {
+  padding: var(--sp-5);
+}
+
+.task-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--sp-5);
+  transition: border-color 110ms var(--ease), background 110ms var(--ease);
+}
+
+.task-card:hover {
+  border-color: var(--accent-line);
+  background: var(--surface-hover);
+}
+
+.task-card + .task-card {
+  margin-top: var(--sp-4);
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* -- Plan steps ---------------------------------------------------------- */
+
+.plan {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plan-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  align-items: start;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  transition: background 90ms var(--ease);
+}
+
+.plan-step:hover {
+  background: var(--surface-hover);
+}
+
+.plan-step[aria-selected="true"] {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+}
+
+.plan-mark {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-step-done .plan-mark {
+  border-color: var(--ok);
+  background: var(--ok-dim);
+  color: var(--ok);
+}
+
+.plan-step-active .plan-mark {
+  border-color: var(--run);
+  background: var(--run-dim);
+  color: var(--run);
+}
+
+.plan-step-failed .plan-mark {
+  border-color: var(--bad);
+  background: var(--bad-dim);
+  color: var(--bad);
+}
+
+.plan-label {
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+}
+
+.plan-meta {
+  margin-top: 1px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* -- File tree ----------------------------------------------------------- */
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  width: 100%;
+  padding: var(--sp-3) var(--sp-5);
+  border-left: 2px solid transparent;
+  text-align: left;
+  transition: background 90ms var(--ease);
+}
+
+.file-row:hover {
+  background: var(--surface-hover);
+}
+
+.file-row[aria-selected="true"] {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+}
+
+.file-path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+  color: var(--text);
+}
+
+.file-dir {
+  color: var(--text-faint);
+}
+
+.file-delta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.delta-add { color: var(--ok); }
+.delta-del { color: var(--bad); }
+
+/* -- Diff ---------------------------------------------------------------- */
+
+.diff-file {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.diff-file + .diff-file {
+  margin-top: var(--sp-6);
+}
+
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.diff-hunk-head {
+  padding: var(--sp-2) var(--sp-5);
+  background: var(--surface-sunken);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.diff-hunk-head:first-of-type {
+  border-top: 0;
+}
+
+.diff-lines {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+  line-height: 1.55;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 44px 44px 14px minmax(0, 1fr);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+
+.diff-line:hover {
+  background: var(--surface-hover);
+}
+
+.diff-line[aria-selected="true"] {
+  border-left-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.diff-num {
+  padding: 0 var(--sp-3);
+  text-align: right;
+  color: var(--text-faint);
+  background: var(--diff-gutter);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+}
+
+.diff-sign {
+  text-align: center;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.diff-text {
+  padding-right: var(--sp-5);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-added {
+  background: var(--diff-add-bg);
+}
+
+.diff-added .diff-num {
+  background: var(--diff-add-bg);
+  color: var(--ok);
+}
+
+.diff-added .diff-sign {
+  color: var(--ok);
+}
+
+.diff-removed {
+  background: var(--diff-del-bg);
+}
+
+.diff-removed .diff-num {
+  background: var(--diff-del-bg);
+  color: var(--bad);
+}
+
+.diff-removed .diff-sign {
+  color: var(--bad);
+}
+
+/* -- Evidence panel ------------------------------------------------------ */
+
+.evidence-empty {
+  padding: var(--sp-7) var(--sp-5);
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-sm);
+}
+
+.kv dt {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding-top: 1px;
+}
+
+.kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chain-link {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: var(--sp-4);
+  padding: var(--sp-3) 0;
+  position: relative;
+}
+
+.chain-link::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.chain-link:first-child::before { top: 50%; }
+.chain-link:last-child::before { bottom: 50%; }
+
+.chain-seq {
+  position: relative;
+  z-index: 1;
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-sunken);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.chain-body {
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+
+.chain-kind {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+}
+
+.chain-note {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* -- Timeline ------------------------------------------------------------ */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.tl-row {
+  display: grid;
+  grid-template-columns: 52px 132px 74px minmax(0, 1fr);
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.tl-row:hover {
+  background: var(--surface-hover);
+}
+
+.tl-seq {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+  color: var(--text-faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-kind {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+}
+
+.tl-detail {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  min-width: 0;
+}
+
+.tl-boundary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--warn-dim);
+  border-top: 1px solid var(--warn);
+  border-bottom: 1px solid var(--warn);
+  color: var(--warn);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+/* Kind colouring: the log is long, and shape-reading beats word-reading. */
+.k-model { color: var(--run); }
+.k-tool { color: var(--accent-strong); }
+.k-workspace { color: var(--text-muted); }
+.k-cost { color: var(--warn); }
+.k-life { color: var(--text); }
+.k-bad { color: var(--bad); }
+
+/* -- Banners ------------------------------------------------------------- */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.banner-warn { border-color: var(--warn); background: var(--warn-dim); }
+.banner-ok { border-color: var(--ok); background: var(--ok-dim); }
+.banner-bad { border-color: var(--bad); background: var(--bad-dim); }
+
+.banner-title {
+  font-weight: 600;
+  margin-bottom: 1px;
+}
+
+/* -- Empty state --------------------------------------------------------- */
+
+.empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--sp-9);
+  text-align: center;
+}
+
+.empty-inner {
+  max-width: 360px;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.empty-inner strong {
+  display: block;
+  margin-bottom: var(--sp-3);
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+}
+
+/* -- Progress bar -------------------------------------------------------- */
+
+.meter {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-active);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 220ms var(--ease);
+}
+
+/* -- Toast --------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  right: var(--sp-6);
+  bottom: var(--sp-6);
+  z-index: 40;
+  max-width: 380px;
+  padding: var(--sp-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.toast-bad { border-color: var(--bad); }

@@ -133,7 +133,14 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Unsupported tool result type: {type(value).__name__}")
 
 
-def _json_envelope(payload: Mapping[str, Any], max_chars: int) -> str:
+def _json_envelope(payload: Mapping[str, Any], max_chars: int) -> tuple[str, bool]:
+    """Encode one tool envelope and report whether the encoder itself failed.
+
+    The flag is returned structurally rather than recovered by searching the
+    encoded text: a tool whose own successful data mentions the fallback code
+    must not be reported to the model as a failed call.
+    """
+
     try:
         encoded = json.dumps(
             payload,
@@ -142,21 +149,26 @@ def _json_envelope(payload: Mapping[str, Any], max_chars: int) -> str:
             separators=(",", ":"),
         )
     except (TypeError, ValueError) as exc:
-        encoded = json.dumps(
-            {
-                "ok": False,
-                "error": {
-                    "code": "OUTPUT_SERIALIZATION",
-                    "message": "Tool result could not be serialized safely.",
-                    "retryable": False,
-                    "type": type(exc).__name__,
+        # This fallback stays well below the 256-character floor AgentConfig
+        # enforces for max_tool_output_chars, so it never needs truncation.
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "OUTPUT_SERIALIZATION",
+                        "message": "Tool result could not be serialized safely.",
+                        "retryable": False,
+                        "type": type(exc).__name__,
+                    },
                 },
-            },
-            separators=(",", ":"),
+                separators=(",", ":"),
+            ),
+            True,
         )
 
     if len(encoded) <= max_chars:
-        return encoded
+        return encoded, False
 
     preview_len = max(0, min(len(encoded), max_chars // 2))
     while True:
@@ -180,7 +192,7 @@ def _json_envelope(payload: Mapping[str, Any], max_chars: int) -> str:
             }
         truncated = json.dumps(shortened, ensure_ascii=False, separators=(",", ":"))
         if len(truncated) <= max_chars or preview_len == 0:
-            return truncated
+            return truncated, False
         preview_len //= 2
 
 
@@ -198,10 +210,11 @@ def _error_message(
     error: dict[str, Any] = {"code": code, "message": message, "retryable": retryable}
     if details is not None:
         error["details"] = details
+    content, _ = _json_envelope({"ok": False, "error": error}, max_chars)
     return ToolMessage(
         call_id=call.id,
         name=call.name,
-        content=_json_envelope({"ok": False, "error": error}, max_chars),
+        content=content,
         is_error=True,
         executed=executed,
         duration_ms=duration_ms,
@@ -578,11 +591,10 @@ class ToolRegistry:
                 max_chars=max_output_chars,
             )
 
-        content = _json_envelope(
+        content, serialized_error = _json_envelope(
             {"ok": True, "data": result, "meta": {"truncated": False}},
             max_output_chars,
         )
-        serialized_error = '"code":"OUTPUT_SERIALIZATION"' in content
         return ToolMessage(
             call_id=call.id,
             name=call.name,

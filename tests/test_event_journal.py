@@ -19,6 +19,7 @@ from react_agent.events import (
     canonical_json,
     compute_event_hash,
     fold_events,
+    fold_events_from,
     upcast_events,
     verify_event_chain,
 )
@@ -516,3 +517,282 @@ async def test_wait_and_concurrent_appends_observe_one_committed_sequence() -> N
     assert len(committed) == 1
     assert len(conflicts) == 1
     assert [event.sequence for event in await waiter] == [2]
+
+
+@pytest.mark.asyncio
+async def test_notification_hub_wakes_waiters_armed_before_the_read() -> None:
+    from react_agent.postgres_journal import _NotificationHub
+
+    hub = _NotificationHub("postgresql:///unused", retry_interval_s=3600.0)
+    # Pretend the listener is already running so arm() does not dial a database.
+    hub._task = asyncio.get_running_loop().create_future()  # type: ignore[assignment]
+
+    armed = await hub.arm()
+    assert not armed.is_set()
+    assert await hub.arm() is armed
+
+    hub._release_waiters()
+
+    assert armed.is_set()
+    # The next waiter must get a fresh event, otherwise it would return
+    # immediately forever after the first notification.
+    next_armed = await hub.arm()
+    assert next_armed is not armed
+    assert not next_armed.is_set()
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_notification_hub_fails_open_and_rate_limits_reconnects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from psycopg import AsyncConnection
+
+    from react_agent.postgres_journal import _NotificationHub
+
+    attempts = 0
+
+    async def refuse(*_: object, **__: object) -> AsyncConnection[dict[str, object]]:
+        nonlocal attempts
+        attempts += 1
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(AsyncConnection, "connect", refuse)
+    hub = _NotificationHub("postgresql:///unreachable", retry_interval_s=3600.0)
+
+    # A hub outage must cost latency, never correctness: waiters get an event
+    # that simply never fires and fall back to their own poll timeout.
+    first = await hub.arm()
+    second = await hub.arm()
+
+    assert not first.is_set()
+    assert second is first
+    assert attempts == 1
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_notification_hub_close_is_idempotent_and_releases_waiters() -> None:
+    from react_agent.postgres_journal import _NotificationHub
+
+    hub = _NotificationHub("postgresql:///unused", retry_interval_s=3600.0)
+    hub._task = asyncio.get_running_loop().create_future()  # type: ignore[assignment]
+    armed = await hub.arm()
+
+    await hub.close()
+    await hub.close()
+
+    assert armed.is_set()
+
+
+async def _varied_run(journal: InMemoryRunJournal, run_id: str) -> None:
+    """Build a run that exercises every branch of the reducer."""
+
+    await journal.create(
+        run_id,
+        RunEventDraft(
+            kind=RunEventKind.RUN_STARTED,
+            privacy=PrivacyClass.PRIVATE,
+            session_id="fold-session",
+            execution_id="execution-1",
+            agent_revision="agent-v1",
+            tool_manifest_hash="tools-v1",
+            data={"status": "running", "session_version": 0},
+            checkpoint={"transcript": [{"role": "user", "content": "hello"}]},
+            safe_checkpoint=True,
+        ),
+        operation_id="run:started",
+    )
+    lease = await journal.acquire(run_id, owner="folder", ttl_s=60)
+    drafts: list[tuple[RunEventDraft, str]] = [
+        (
+            RunEventDraft(
+                kind=RunEventKind.MODEL_STARTED,
+                step=1,
+                execution_id="execution-1",
+                data={"attempt": 1},
+            ),
+            "model:s1:started",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.MODEL_COMPLETED,
+                step=1,
+                execution_id="execution-1",
+                data={"attempt": 1, "outcome": "completed", "tool_calls": 1},
+                usage_delta=Usage(input_tokens=11, output_tokens=7, total_tokens=18),
+                model_calls_delta=1,
+                safe_checkpoint=True,
+            ),
+            "model:s1:completed",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.COST_RECORDED,
+                step=1,
+                execution_id="execution-1",
+                data={"record_id": "cost-1", "amount_micros": 42, "currency": "USD"},
+            ),
+            "cost:s1",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.TOOL_PLANNED,
+                privacy=PrivacyClass.PRIVATE,
+                step=1,
+                call_key="s1:t0",
+                execution_id="execution-1",
+                data={"resume_policy": "idempotent_retry", "tool_name": "probe"},
+                checkpoint={"call": {"id": "c1", "name": "probe", "arguments": "{}"}},
+                safe_checkpoint=True,
+                tool_calls_delta=1,
+            ),
+            "tool:s1:t0:planned",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.TOOL_STARTED,
+                step=1,
+                call_key="s1:t0",
+                execution_id="execution-1",
+                data={"attempt": 1, "tool_name": "probe"},
+            ),
+            "tool:s1:t0:started",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.TOOL_COMPLETED,
+                privacy=PrivacyClass.PRIVATE,
+                step=1,
+                call_key="s1:t0",
+                execution_id="execution-1",
+                data={"executed": True, "tool_name": "probe"},
+                checkpoint={
+                    "message": {
+                        "role": "tool",
+                        "call_id": "c1",
+                        "name": "probe",
+                        "content": "{}",
+                    }
+                },
+                tool_executions_delta=1,
+            ),
+            "tool:s1:t0:completed",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.LOOP_DETECTED,
+                step=2,
+                execution_id="execution-1",
+                data={"action_fingerprint": "abc", "repeat_count": 2},
+            ),
+            "loop:s2",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.RUN_RESUMED,
+                execution_id="execution-2",
+                data={"resume_reason": "process_restart"},
+            ),
+            "run:resumed",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.SESSION_COMMITTED,
+                execution_id="execution-2",
+                data={"session_version": 1},
+                safe_checkpoint=True,
+            ),
+            "session:committed",
+        ),
+        (
+            RunEventDraft(
+                kind=RunEventKind.RUN_COMPLETED,
+                execution_id="execution-2",
+                data={"status": "completed", "stop_reason": "completed"},
+                safe_checkpoint=True,
+            ),
+            "run:completed",
+        ),
+    ]
+    for draft, operation_id in drafts:
+        await journal.append(
+            run_id,
+            draft,
+            expected_sequence=(await journal.read(run_id))[-1].sequence,
+            operation_id=operation_id,
+            lease=lease,
+        )
+
+
+@pytest.mark.asyncio
+async def test_incremental_fold_equals_a_full_fold_at_every_split() -> None:
+    journal = InMemoryRunJournal()
+    await _varied_run(journal, "fold-run")
+    events = await journal.read("fold-run")
+    expected = fold_events(events)
+
+    assert len(events) >= 10
+    for split in range(1, len(events)):
+        prefix = fold_events(events[:split])
+        # Continuing from a verified prefix must be indistinguishable from
+        # folding the whole run; anything else would make recovery decisions
+        # depend on how many events happened to be cached.
+        assert fold_events_from(prefix, events[split:]) == expected, f"split {split}"
+
+    # An empty tail is a no-op, not an error.
+    assert fold_events_from(expected, ()) == expected
+
+
+@pytest.mark.asyncio
+async def test_incremental_fold_rejects_a_tail_that_does_not_join_its_prefix() -> None:
+    journal = InMemoryRunJournal()
+    await _varied_run(journal, "join-run")
+    events = await journal.read("join-run")
+    prefix = fold_events(events[:4])
+
+    # A gap: the tail must start at exactly prefix.last_sequence + 1.
+    with pytest.raises(EventSequenceError):
+        fold_events_from(prefix, events[5:])
+
+    # A fork: same sequence, but the hash link does not lead back to the prefix.
+    forged = replace(events[4], previous_hash=GENESIS_HASH)
+    with pytest.raises(EventHashError):
+        fold_events_from(prefix, (forged,))
+
+    # A different run's tail cannot be grafted on.
+    await _varied_run(journal, "other-run")
+    other = await journal.read("other-run")
+    with pytest.raises(EventSequenceError):
+        fold_events_from(prefix, other[4:5])
+
+
+@pytest.mark.asyncio
+async def test_incremental_fold_still_refuses_events_after_a_terminal_fact() -> None:
+    journal = InMemoryRunJournal()
+    await _varied_run(journal, "terminal-run")
+    events = await journal.read("terminal-run")
+    complete = fold_events(events)
+    assert complete.terminal is not None
+
+    # Correctly sequenced and correctly hash-linked, so only the terminal rule
+    # can reject it. Resuming from a cached snapshot must not lose that rule.
+    after_terminal = StoredRunEvent.from_draft(
+        RunEventDraft(
+            kind=RunEventKind.MODEL_STARTED,
+            step=9,
+            execution_id="execution-2",
+            data={"attempt": 1},
+        ),
+        run_id="terminal-run",
+        sequence=complete.last_sequence + 1,
+        operation_id="after-terminal",
+        previous_hash=complete.last_hash,
+        occurred_at=1.0,
+        session_id=complete.session_id,
+        execution_id="execution-2",
+        agent_revision=complete.agent_revision,
+        tool_manifest_hash=complete.tool_manifest_hash,
+    )
+    with pytest.raises(EventTerminalError):
+        fold_events_from(complete, (after_terminal,))

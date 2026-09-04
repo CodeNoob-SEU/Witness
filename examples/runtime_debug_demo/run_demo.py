@@ -127,7 +127,7 @@ def _structured(result: object, tool_name: str) -> dict[str, Any]:
 def _process_snapshot() -> dict[int, str] | None:
     try:
         completed = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
+            ["ps", "-axww", "-o", "pid=,command="],
             check=True,
             capture_output=True,
             text=True,

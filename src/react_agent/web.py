@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import asyncio
 import json
 import math
 import operator
 import os
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -15,11 +17,12 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, cast
+from typing import Annotated, Literal, Protocol, cast, runtime_checkable
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from .agent import AgentConfig, ReActAgent
@@ -29,10 +32,22 @@ from .context import (
     FileContextSummaryStore,
     ModelContextCompressor,
 )
+from .cost import PricingCatalog
 from .cost_ledger import MAX_COST_MICROS
-from .events import RunSnapshot
+from .demo import (
+    DEMO_MODEL_NAME,
+    DEMO_TASKS,
+    DEMO_TASKS_BY_ID,
+    DemoTask,
+    build_demo_agent,
+    demo_pricing,
+    seed_demo_repository,
+)
+from .evals import WORKSPACE_SUITE, ReferenceWorkspaceModel, run_suite
+from .events import RunSnapshot, StoredRunEvent, verify_event_chain
 from .journal import InMemoryRunJournal, RunJournal
 from .models import AgentResult, AgentStreamEvent, RunStatus, StopReason, TranscriptItem
+from .patch import PatchUnavailableError, materialize_run_patch
 from .postgres_journal import PostgresRunJournal
 from .provider import ApiMode, OpenAIModel, ProviderCapabilities
 from .repo_tools import create_repository_tools
@@ -166,6 +181,25 @@ class _RuntimeView(Protocol):
     ) -> AsyncIterator[RuntimeEvent]: ...
 
     async def list_session_runs(self, session_id: str) -> tuple[RunSnapshot, ...]: ...
+
+
+@runtime_checkable
+class _EventLogView(Protocol):
+    """The extra capability the audit and patch endpoints need."""
+
+    async def read_events(
+        self, run_id: str, *, after_sequence: int = 0
+    ) -> tuple[StoredRunEvent, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DemoEnvironment:
+    """Everything the console needs to dispatch and explain a demo task."""
+
+    repository: Path
+    managed_root: Path
+    session_id: str
+    tasks: tuple[DemoTask, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +400,22 @@ def calculate_expression(
     return {"expression": expression, "result": _evaluate_expression(expression)}
 
 
+def _optional_env(name: str) -> str | None:
+    """Read an optional setting, treating blank as unset.
+
+    Compose and Kubernetes both express "not configured" by injecting an empty
+    string (``${VAR:-}``), so an empty value must mean the same as an absent
+    one. Otherwise an unset OPENAI_BASE_URL becomes "", which then fails the
+    HTTPS check as though the operator had configured a bad URL.
+    """
+
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
+
+
 def _truthy_env(name: str, *, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -458,9 +508,41 @@ async def _build_journal_from_env() -> tuple[RunJournal, PostgresRunJournal | No
     return journal, journal
 
 
+def _demo_root_from_env() -> Path:
+    configured = os.getenv("REACT_AGENT_DEMO_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(tempfile.gettempdir()) / "witness-demo"
+
+
+def _build_demo_from_env() -> DemoEnvironment | None:
+    """Seed the offline demo when ``REACT_AGENT_DEMO`` is set.
+
+    Demo mode replaces exactly one thing — the model — so the console exercises
+    the real Runtime, the real Git worktree isolation, and the real durable log
+    without needing credentials or a network.
+    """
+
+    if not _truthy_env("REACT_AGENT_DEMO"):
+        return None
+    root = _demo_root_from_env()
+    repository = root / "witness-demo"
+    managed_root = root / "worktrees"
+    try:
+        seed_demo_repository(repository)
+    except Exception:
+        raise RuntimeError("Unable to seed the demo repository.") from None
+    return DemoEnvironment(
+        repository=repository,
+        managed_root=managed_root,
+        session_id="witness-demo",
+        tasks=DEMO_TASKS,
+    )
+
+
 def _build_workspace_from_env() -> WorkspaceCheckpointStore | None:
-    repository = os.getenv("REACT_AGENT_REPOSITORY")
-    managed_root = os.getenv("REACT_AGENT_WORKTREE_ROOT")
+    repository = _optional_env("REACT_AGENT_REPOSITORY")
+    managed_root = _optional_env("REACT_AGENT_WORKTREE_ROOT")
     if repository is None and managed_root is None:
         return None
     if not repository or not managed_root:
@@ -475,14 +557,16 @@ def _build_workspace_from_env() -> WorkspaceCheckpointStore | None:
         raise RuntimeError("Unable to initialize the managed Git workspace.") from None
 
 
-def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
-    model_name = os.getenv("OPENAI_MODEL")
+def _build_agent_from_env(
+    *, workspace_enabled: bool = False
+) -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
+    model_name = _optional_env("OPENAI_MODEL")
     if not model_name:
         raise RuntimeError("Set OPENAI_MODEL before starting react-agent-web.")
-    if not os.getenv("OPENAI_API_KEY"):
+    if not _optional_env("OPENAI_API_KEY"):
         raise RuntimeError("Set OPENAI_API_KEY before starting react-agent-web.")
 
-    raw_api_mode = os.getenv("OPENAI_API_MODE", "responses")
+    raw_api_mode = _optional_env("OPENAI_API_MODE") or "responses"
     if raw_api_mode not in ("responses", "chat_completions"):
         raise RuntimeError("OPENAI_API_MODE must be responses or chat_completions.")
     api_mode = cast(ApiMode, raw_api_mode)
@@ -497,18 +581,18 @@ def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
     model = OpenAIModel(
         model_name,
         api_mode=api_mode,
-        base_url=os.getenv("OPENAI_BASE_URL"),
+        base_url=_optional_env("OPENAI_BASE_URL"),
         allow_insecure_http=_truthy_env("OPENAI_ALLOW_INSECURE_HTTP"),
         capabilities=capabilities,
     )
-    raw_context_strategy = os.getenv("REACT_AGENT_CONTEXT_STRATEGY", "tiered")
+    raw_context_strategy = _optional_env("REACT_AGENT_CONTEXT_STRATEGY") or "tiered"
     try:
         context_strategy = ContextStrategy(raw_context_strategy)
     except ValueError:
         raise RuntimeError(
             "REACT_AGENT_CONTEXT_STRATEGY must be tiered, generic, or stop."
         ) from None
-    summary_root = os.getenv("REACT_AGENT_CONTEXT_SUMMARY_DIR")
+    summary_root = _optional_env("REACT_AGENT_CONTEXT_SUMMARY_DIR")
     context_governor = ContextGovernor(
         strategy=context_strategy,
         compressor=(
@@ -522,26 +606,23 @@ def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
     )
     agent = ReActAgent(
         model,
-        _tools_from_env(),
-        config=_agent_config_from_env(context_strategy),
+        _tools_from_env(workspace_enabled=workspace_enabled),
+        config=_agent_config_from_env(context_strategy, workspace_enabled=workspace_enabled),
         context_governor=context_governor,
     )
     return model, agent, model_name, api_mode
 
 
-def _repository_tools_enabled() -> bool:
-    return os.getenv("REACT_AGENT_REPOSITORY") is not None
+def _tools_from_env(*, workspace_enabled: bool) -> list[Tool]:
+    """Register repository tools only when a managed Git worktree exists.
 
-
-def _tools_from_env() -> list[Tool]:
-    """Register repository tools only when a managed workspace is configured.
-
-    Without ``REACT_AGENT_REPOSITORY`` there is no isolated worktree, so the
-    workbench keeps its network-free calculator as the only tool.
+    Without one they would have nowhere safe to write, and the Runtime's
+    checkpoint, divergence and reconciliation guarantees would not apply to
+    their effects; the workbench then keeps its network-free calculator only.
     """
 
     tools: list[Tool] = [calculate_expression]
-    if _repository_tools_enabled():
+    if workspace_enabled:
         tools.extend(
             create_repository_tools(
                 require_command_approval=_truthy_env("REACT_AGENT_COMMAND_APPROVAL"),
@@ -550,8 +631,10 @@ def _tools_from_env() -> list[Tool]:
     return tools
 
 
-def _agent_config_from_env(context_strategy: ContextStrategy) -> AgentConfig:
-    if _repository_tools_enabled():
+def _agent_config_from_env(
+    context_strategy: ContextStrategy, *, workspace_enabled: bool
+) -> AgentConfig:
+    if workspace_enabled:
         return AgentConfig(
             max_steps=60,
             max_tool_calls=200,
@@ -647,6 +730,33 @@ def _configured_runtime(request: Request) -> _RuntimeView:
     if runtime is None:
         raise HTTPException(status_code=503, detail="Durable Runtime is not configured.")
     return runtime
+
+
+def _event_log(request: Request) -> _EventLogView:
+    """The runtime, if it can hand back the stored chain verbatim.
+
+    Injected test doubles implement only :class:`_RuntimeView`; the audit
+    endpoints need more than that, so they fail explicitly rather than
+    fabricating an empty chain.
+    """
+
+    runtime = _configured_runtime(request)
+    if not isinstance(runtime, _EventLogView):
+        raise HTTPException(
+            status_code=501,
+            detail="This Runtime cannot expose the stored event chain.",
+        )
+    return runtime
+
+
+def _demo_environment(request: Request) -> DemoEnvironment:
+    environment = cast(
+        "DemoEnvironment | None",
+        getattr(request.app.state, "demo", None),
+    )
+    if environment is None:
+        raise HTTPException(status_code=404, detail="Demo mode is not enabled.")
+    return environment
 
 
 def _runtime_http_exception(exc: Exception) -> HTTPException:
@@ -1270,6 +1380,7 @@ def create_app(
     model_name: str = "test-model",
     api_mode: ApiMode = "chat_completions",
     session_store: SessionStore | None = None,
+    demo_environment: DemoEnvironment | None = None,
 ) -> FastAPI:
     """Create the web app; dependency injection keeps API tests fully offline."""
 
@@ -1282,9 +1393,29 @@ def create_app(
         owned_journal: PostgresRunJournal | None = None
         try:
             if agent is None and runtime is None:
-                owned_model, configured_agent, configured_model, configured_mode = (
-                    _build_agent_from_env()
-                )
+                demo = _build_demo_from_env()
+                configured_workspace: WorkspaceCheckpointStore | None
+                configured_mode: ApiMode
+                pricing: PricingCatalog | None
+                if demo is not None:
+                    # Demo mode owns its own repository, agent and price list, so
+                    # it must not fall through to the credentialed env wiring.
+                    configured_agent = build_demo_agent()
+                    configured_model = DEMO_MODEL_NAME
+                    configured_mode = "chat_completions"
+                    configured_workspace = GitWorktreeWorkspace(
+                        demo.repository,
+                        demo.managed_root,
+                    )
+                    pricing = demo_pricing()
+                else:
+                    configured_workspace = _build_workspace_from_env()
+                    owned_model, configured_agent, configured_model, configured_mode = (
+                        _build_agent_from_env(
+                            workspace_enabled=configured_workspace is not None
+                        )
+                    )
+                    pricing = None
                 metric_cardinality = _build_metric_cardinality_policy(
                     configured_agent,
                     configured_model,
@@ -1295,12 +1426,14 @@ def create_app(
                     journal,
                     model_name=configured_model,
                     telemetry=create_telemetry(cardinality=metric_cardinality),
-                    workspace=_build_workspace_from_env(),
+                    workspace=configured_workspace,
+                    pricing=pricing,
                 )
                 app.state.agent = configured_agent
                 app.state.runtime = owned_runtime
                 app.state.model_name = configured_model
                 app.state.api_mode = configured_mode
+                app.state.demo = demo
             yield
         finally:
             try:
@@ -1317,6 +1450,7 @@ def create_app(
     app = FastAPI(title="ReAct Agent Chat", version="0.1.0", lifespan=lifespan)
     app.state.sessions = store
     app.state.runtime = runtime
+    app.state.demo = demo_environment
     if agent is not None:
         app.state.agent = agent
         app.state.model_name = model_name
@@ -1324,6 +1458,10 @@ def create_app(
     elif runtime is not None:
         app.state.model_name = model_name
         app.state.api_mode = api_mode
+
+    # The console ships as plain ES modules and stylesheets inside the wheel, so
+    # it needs no build step and no Node toolchain to serve.
+    app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
@@ -1425,6 +1563,162 @@ def create_app(
         except Exception as exc:
             raise _runtime_http_exception(exc) from None
         return JSONResponse(content=response)
+
+    # ----------------------------------------------------------------------
+    # Console projections. Every one of these reads durable facts back out; none
+    # of them adds a new event kind or writes to the log.
+    # ----------------------------------------------------------------------
+
+    @app.get("/api/console")
+    async def console_config(request: Request) -> JSONResponse:
+        """What the console needs to render itself honestly."""
+
+        demo = cast(
+            "DemoEnvironment | None",
+            getattr(request.app.state, "demo", None),
+        )
+        journal_kind = "unknown"
+        configured_runtime = getattr(request.app.state, "runtime", None)
+        journal = getattr(configured_runtime, "journal", None)
+        if journal is not None:
+            journal_kind = (
+                "postgres" if isinstance(journal, PostgresRunJournal) else "in_memory"
+            )
+        return JSONResponse(
+            content={
+                "model": getattr(request.app.state, "model_name", None),
+                "demo": demo is not None,
+                "demo_session_id": demo.session_id if demo is not None else None,
+                "repository": demo.repository.name if demo is not None else None,
+                "journal": journal_kind,
+                # Named so the Settings view can state the boundary rather than
+                # imply a sandbox the runtime does not actually provide.
+                "workspace_policy": {
+                    "isolation": "git_worktree_per_session",
+                    "writes": "confined to the session worktree",
+                    "denied": (
+                        "absolute paths, '..' traversal, escaping symlinks, "
+                        "sensitive-path denylist"
+                    ),
+                    "network": "not mediated by this runtime",
+                },
+            }
+        )
+
+    @app.get("/api/tasks")
+    async def list_tasks(request: Request) -> JSONResponse:
+        demo = _demo_environment(request)
+        return JSONResponse(
+            content={
+                "session_id": demo.session_id,
+                "repository": demo.repository.name,
+                "tasks": [task.to_json() for task in demo.tasks],
+            }
+        )
+
+    @app.post("/api/tasks/{task_id}/runs", status_code=202)
+    async def start_task_run(task_id: str, request: Request) -> JSONResponse:
+        demo = _demo_environment(request)
+        task = DEMO_TASKS_BY_ID.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="No such task.")
+        configured_runtime = _configured_runtime(request)
+        command = StartRun(
+            prompt=task.prompt,
+            session_id=demo.session_id,
+            idempotency_key=_idempotency_key(request),
+        )
+        response = await _submit_runtime_command(configured_runtime, command)
+        return JSONResponse(status_code=202, content={**response, "task_id": task_id})
+
+    @app.get("/api/runs/{run_id}/patch")
+    async def run_patch(run_id: str, request: Request) -> JSONResponse:
+        """Rebuild the run's patch from Git and attach its durable provenance.
+
+        The event log stores tree and commit ids, never file content, so the
+        patch is materialized on demand instead of read back out of the chain.
+        """
+
+        demo = _demo_environment(request)
+        log = _event_log(request)
+        try:
+            events = await log.read_events(run_id)
+        except Exception as exc:
+            raise _runtime_http_exception(exc) from None
+        try:
+            patch = await asyncio.to_thread(
+                materialize_run_patch, str(demo.repository), events
+            )
+        except PatchUnavailableError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return JSONResponse(content={"run_id": run_id, **patch.to_json()})
+
+    @app.get("/api/runs/{run_id}/integrity")
+    async def run_integrity(run_id: str, request: Request) -> JSONResponse:
+        """Verify the stored hash chain from sequence 1 and report the result.
+
+        A failure here is reported, not raised: "this chain does not verify" is
+        the single most important thing an audit view can say, and it must not
+        be indistinguishable from a transport error.
+        """
+
+        log = _event_log(request)
+        try:
+            events = await log.read_events(run_id)
+        except Exception as exc:
+            raise _runtime_http_exception(exc) from None
+
+        verified = True
+        reason: str | None = None
+        try:
+            verify_event_chain(events)
+        except Exception as exc:
+            verified = False
+            reason = type(exc).__name__
+
+        executions: list[str] = []
+        for event in events:
+            if event.execution_id and event.execution_id not in executions:
+                executions.append(event.execution_id)
+        return JSONResponse(
+            content={
+                "run_id": run_id,
+                "verified": verified,
+                "reason": reason,
+                "events": len(events),
+                "first_sequence": events[0].sequence if events else None,
+                "last_sequence": events[-1].sequence if events else None,
+                "executions": len(executions),
+                "execution_ids": executions,
+                # A run whose executions exceed one was interrupted and resumed
+                # rather than restarted; that is the fact worth surfacing.
+                "resumed": len(executions) > 1,
+            }
+        )
+
+    @app.get("/api/evals")
+    async def evals(request: Request) -> JSONResponse:
+        """Run the built-in workspace suite offline and report it verbatim."""
+
+        _demo_environment(request)
+        report = await run_suite(
+            WORKSPACE_SUITE,
+            build_model=ReferenceWorkspaceModel,
+            pricing=demo_pricing(),
+        )
+        return JSONResponse(
+            content={
+                **report.to_json(),
+                "suite": "WORKSPACE_SUITE",
+                "model": "reference-workspace-model",
+                # Stated in the payload so the UI cannot quietly present this as
+                # a model benchmark.
+                "caveat": (
+                    "Scored against the resulting worktree, using a deterministic "
+                    "reference model. This measures the harness, not a model."
+                ),
+            }
+        )
 
     @app.post("/api/runs/{run_id}/resume", status_code=202)
     async def resume_run(run_id: str, request: Request) -> JSONResponse:
@@ -1792,9 +2086,28 @@ app = create_app()
 
 
 def main() -> None:
-    host = os.getenv("REACT_AGENT_WEB_HOST", "127.0.0.1")
-    port = int(os.getenv("REACT_AGENT_WEB_PORT", "8000"))
-    uvicorn.run("react_agent.web:app", host=host, port=port, reload=False)
+    parser = argparse.ArgumentParser(
+        prog="react-agent-web",
+        description="Serve the Witness console.",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help=(
+            "Run the offline demo: seed a repository, register the task catalog, "
+            "and drive it with a deterministic scripted provider. Needs no API key "
+            "and no network."
+        ),
+    )
+    parser.add_argument("--host", default=os.getenv("REACT_AGENT_WEB_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("REACT_AGENT_WEB_PORT", "8000")))
+    arguments = parser.parse_args()
+
+    if arguments.demo:
+        # Set rather than read so `--demo` and the environment variable are one
+        # switch; the app factory runs later, inside uvicorn.
+        os.environ["REACT_AGENT_DEMO"] = "1"
+    uvicorn.run("react_agent.web:app", host=arguments.host, port=arguments.port, reload=False)
 
 
 if __name__ == "__main__":

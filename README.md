@@ -12,6 +12,42 @@
   PostgreSQL Event Sourcing · Session Resume · Trace Replay · Git Worktree · OpenTelemetry
 </p>
 
+<p align="center">
+  <a href="https://github.com/CodeNoob-SEU/Witness/actions/workflows/ci.yml">
+    <img src="https://github.com/CodeNoob-SEU/Witness/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+  <img src="https://img.shields.io/badge/tests-447%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13-blue" alt="python">
+  <img src="https://img.shields.io/badge/mypy-strict-blue" alt="mypy strict">
+</p>
+
+Agent 跑到一半、工具已经改了文件的时候，进程被 `kill -9` 了——**它能接着跑完，而且你能证明
+历史没被改过**。这就是 Witness 要解决的那一个问题。
+
+```bash
+export REACT_AGENT_POSTGRES_DSN="postgresql://user:pass@127.0.0.1:5432/db"
+uv run python examples/chaos_resume.py     # 崩溃恢复：kill -9 后从 durable 事实续跑
+uv run python examples/fencing_takeover.py # 抢占安全：僵尸进程的写入被 fencing 拒绝
+uv run python benchmarks/agent_eval.py --offline   # 评测：任务通过率 / 步数 / 成本
+uv run react-agent-web --demo              # Web 控制台：离线、确定性、不需要 API key
+```
+
+30 秒版本：
+
+| 想知道 | 答案 | 证据 |
+| --- | --- | --- |
+| 崩溃后真能恢复吗 | 能，且事件链仍可从 sequence 1 完整校验 | [`examples/chaos_resume.py`](examples/chaos_resume.py) · CI 里每次真实 `SIGKILL` |
+| 两个 worker 抢同一个 Run 呢 | 旧代次的写入被 fencing token 拒绝 | [`examples/fencing_takeover.py`](examples/fencing_takeover.py) |
+| Agent 到底做成了没有 | 按**文件系统结果**打分，不看模型自述 | [`react_agent/evals.py`](src/react_agent/evals.py) |
+| 改出来的每一行凭什么信 | 点开补丁任意一行，看产生它的 durable 事件 | [Web 控制台](#web-控制台) · `uv run react-agent-web --demo` |
+| 会不会拖垮数据库 | 热路径 `load()` 0.36 ms，SSE follower 新建连接 0 | [`benchmarks/`](benchmarks/) |
+| 为什么这么设计 | 每条决策的代价与替代方案 | [`docs/DESIGN.md`](docs/DESIGN.md) |
+
+三条不变量贯穿全部实现：**先记录意图再执行副作用**、**日志是事实 Snapshot 是缓存**、
+**可观测性不参与正确性**。展开见 [设计取舍](docs/DESIGN.md)。
+
+---
+
 ## 项目目标
 
 Witness 面向需要长时间运行、会调用工具并可能修改代码仓库的 Agent 任务。它不只实现一层
@@ -39,16 +75,199 @@ ReAct 循环，还提供一套可审计的执行底座：把已经提交的事�
 | PostgreSQL Journal | ✅ 已实现 | PostgreSQL 16+、CAS、幂等 operation、租约、fencing、Session 单活 Run |
 | Session Resume | ✅ 已实现 | 新 execution 恢复、模型 abandoned、工具恢复策略、人工 reconciliation |
 | Live / Replay | ✅ 已实现 | durable SSE、实时模型 delta、Timeline、Audit、只读 Replay、安全 Fork |
-| 仓库级任务 | ✅ 已实现 | Session 隔离 Git worktree、前后 checkpoint、diff 摘要与偏离检测、内置七个仓库工具 |
+| 仓库级任务 | ✅ 已实现 | Session 隔离 Git worktree、前后 checkpoint、diff 摘要与偏离检测、内置仓库工具（离线 demo 用 3 个，真实任务用 7 个） |
 | Token / 成本 | ✅ 已实现 | usage 明细、冻结成本记录、独立追加式成本调整账本、Session 汇总 |
 | OpenTelemetry | ✅ 已实现 | Agent / model / tool span、Resume Span Link、GenAI metrics、隐私投影 |
-| 前端工作台 | ✅ 已实现 | Live、Timeline、Audit、Replay、Workspace Diff、Cost、History |
+| 前端工作台 | ✅ 已实现 | 零构建 ES module 控制台：Tasks、三栏 Workspace（计划 / 补丁 / 证据）、Runs、Recovery、Evals、Config |
+| 离线演示 | ✅ 已实现 | `--demo`：真实 runtime + 真实 worktree + 确定性 provider，无需 API key 或网络 |
+| 计划审批门 | ◻️ 暂未覆盖 | 控制台展示的「执行计划」是事件流投影（进度），不是执行前的人工审批闸门 |
 | 跨主机搬迁 worktree | ◻️ 暂未覆盖 | 当前支持同机多进程或共享 Git 存储；跨主机工作区迁移留待后续阶段 |
 
-当前验证命令与最新评测工件见文末“开发验证”、
-[`docs/evaluations/context_ab_results.md`](docs/evaluations/context_ab_results.md) 和
+当前验证基线：本地 **`428 passed, 22 skipped`**，接上 PostgreSQL 后 **`447 passed`**（CI 在
+Python 3.11 / 3.12 / 3.13 上跑满，含 22 项需要真实 PostgreSQL 16 的 durable 测试与崩溃恢复
+测试）；Ruff、Mypy strict 和 wheel 构建均通过，发布包内包含 `001–010` 数据库 migration。
+本地 `uv sync --extra dev --extra debug` 后 `uv run pytest -q` 即可跑通全部非数据库测试，不需要额外
+安装 `otel` extra；设置 `TEST_POSTGRES_DSN` 后 22 项 skip 一并转为通过（另有 3 项前端测试需要 Node.js）。
+
+其中 3 项前端测试在 Node 下直接执行控制台的 ES module，覆盖两条会静默污染操作者所见内容的
+逻辑：durable 事件的有序投递，以及断线重连该从哪个游标续读。
+
+CI 里有一道显式护栏：如果 PostgreSQL service container 不可达导致 durable 测试变成 skip，
+构建会直接失败，而不是留下一个「全绿但什么都没验证」的假象。
+
+
+上下文治理、Runtime Debugging 与项目级 PR 的评测工件见
+[`docs/evaluations/context_ab_results.md`](docs/evaluations/context_ab_results.md)、
 [`docs/evaluations/context_live_ab_results.md`](docs/evaluations/context_live_ab_results.md) 和
-[`docs/evaluations/debugging_demo_results.md`](docs/evaluations/debugging_demo_results.md)。
+[`docs/evaluations/debugging_demo_results.md`](docs/evaluations/debugging_demo_results.md)；
+一次真实 SWE-bench 任务的端到端记录（含两次 `kill -9` 与跨进程 Resume）见
+[`analysis_outputs/swebench_e2e_20260904/`](analysis_outputs/swebench_e2e_20260904/README.md)。
+
+## 崩溃恢复演示
+
+README 里所有「可恢复」的说法都可以自己跑一遍验证：
+
+```bash
+export REACT_AGENT_POSTGRES_DSN="postgresql://user:pass@127.0.0.1:5432/db"
+uv run python examples/chaos_resume.py
+```
+
+演示会在 worker A 提交 `tool_started`（副作用可能已经发生的那一刻）之后对它 `kill -9`，
+再由 worker B 仅凭 durable 事实恢复并跑到最终答案：
+
+```text
+   durable facts before the crash:          full durable chain (after recovery):
+     1  run_started    [safe checkpoint]      ...
+     2  checkpoint     [safe checkpoint]        8  run_resumed
+     3  model_started                           9  tool_started
+     4  model_completed[safe checkpoint]       10  tool_completed
+     5  cost_recorded                          ...
+     6  tool_planned   [safe checkpoint]       17  run_completed  [safe checkpoint]
+     7  tool_started
+   worker A killed (exit=-9)                 hash chain : verified over 17 events
+   state=waiting_tool pending=['s1:t0']      executions : 2（崩溃强制开启新 execution）
+
+   tool side effects actually performed:
+      attempt=1  idempotency_key=<run>:s1:t0
+      attempt=2  idempotency_key=<run>:s1:t0   ← 同一个稳定幂等键，服务端可据此去重
+```
+
+两个要点：崩溃后事件链**仍能从 sequence 1 完整校验**（历史没有被修补或回填），以及被中断的
+模型 attempt 会被记为**成本未知**而不是 0。同样的场景固化在 `tests/test_chaos_recovery.py`，
+在 CI 里每次都会真实地 `SIGKILL` 一个子进程。
+
+## 双 worker 抢占与 fencing
+
+租约只能回答「谁应该在写」，回答不了「这次写是不是当前 owner 发出的」——进程可能因为 GC
+停顿、虚拟机冻结或网络分区卡住，醒来时仍然以为自己持有租约。fencing token 就是那个代次计数：
+
+```bash
+uv run python examples/fencing_takeover.py
+```
+
+```text
+STEP 1  worker A 拿到租约            worker A holds fence=1，提交 sequence 2
+STEP 2  worker B 被拒绝              the run already has a live writer lease
+STEP 3  worker A 卡住，停止续约      （睡过 TTL）
+STEP 4  worker B 接管                worker B holds fence=2 (was 1)，提交 sequence 3
+STEP 5  worker A 醒来继续写          REJECTED: writer lease is missing, expired, or stale
+
+   durable chain — A 的过期写从未落库:
+       1  run_started        operation=run:started
+       2  model_started      operation=a-1
+       3  model_started      operation=b-1
+```
+
+关键在 STEP 5：worker A **进程还活着**、手里还攥着一个 lease 对象、也无从知道时间已经流逝。
+只有比较 fencing token 才能把它这次写认定为过期并拒绝。对应断言在
+`tests/test_chaos_recovery.py`。
+
+## 性能基线
+
+数字由 [`benchmarks/journal_benchmark.py`](benchmarks/journal_benchmark.py) 产生，可以自己复现
+（PostgreSQL 16，单机 loopback，取中位数）：
+
+| 单个 Run 的事件数 | `append` | `load()` 冷启动 | `load()` 进程内已折叠 |
+| ---: | ---: | ---: | ---: |
+| 100 | 2.6 ms | 4.4 ms | 0.37 ms |
+| 500 | 3.5 ms | 20.9 ms | 0.37 ms |
+| 2000 | 6.8 ms | 105.8 ms | 0.36 ms |
+
+`RunSnapshot` 就是 reducer 的完整状态，所以在已验证的前缀上继续折叠与从 sequence 1 全量折叠
+等价——但只读取并重新哈希增量部分。进程内缓存只保存**本进程自己从已校验事件链折叠出来的**
+状态，绝不从存储读取投影：否则一条伪造的行就能冒充历史，而 hash 链正是为了防这件事。每次
+继续折叠仍然会校验增量与缓存前缀之间的哈希链接，缓存对不上就退回全量折叠。
+
+冷启动那一列是**故意不优化**的：一个新进程第一次读某个 Run 时，就该付从创世链接开始完整校验
+的代价。
+
+SSE follower 的连接开销也一并测量：3 个 follower、4 秒内 120 次 `wait()`，**新建 PostgreSQL
+连接数为 0**（每个 journal 共用一条 `LISTEN` 连接，读走连接池）。
+
+## 修改仓库的工具
+
+只有 [`react_agent.workspace_tools`](src/react_agent/workspace_tools.py) 里的工具能改文件，它们
+只在配置了 workspace adapter 时才注册——没有受管 worktree 时宁可不提供，也不会退回到服务端
+当前目录：
+
+| 工具 | 语义 |
+| --- | --- |
+| `list_workspace_files` | 只读、幂等、可并发；跳过 `.git` 与敏感路径 |
+| `read_workspace_file` | 只读、幂等、可并发；限 UTF-8 文本与 256 KiB |
+| `write_workspace_file` | 幂等（同内容重写得到同一棵树）、**不可并发** |
+
+`write_workspace_file` 声明 `idempotent=True` 是有代价的承诺：正因如此，崩溃后的 Resume 才敢
+自动重试它，而不是停下来等人工。它不可并发，是因为同一轮的两个写可能指向同一个文件，而
+Runtime 每个调用只取一次 before-tool checkpoint。
+
+绝对路径、`..` 穿越、指向工作区之外的 symlink、以及 workspace 模块的敏感路径清单全部拒绝；
+路径类问题以结构化结果返回而不是抛异常，好让模型自己纠正后重试。文件内容可能是仓库里的
+任何东西，所以这三个工具都保持默认的 `DebugExposure.METADATA`，不会进调试流。
+
+这三个工具是离线 demo 与评测套件使用的最小词汇。真实仓库任务（例如 SWE-bench）使用
+[`react_agent.repo_tools`](src/react_agent/repo_tools.py) 里的七个工具，见下文「内置仓库工具」；
+配置了 `REACT_AGENT_REPOSITORY` 的 Web 工作台注册的是后者。
+
+## 一键启动
+
+```bash
+# 崩溃恢复演示：不需要任何凭据，用的是脚本化模型
+docker compose run --rm demo
+
+# 完整工作台
+OPENAI_API_KEY=... OPENAI_MODEL=... docker compose up
+# 打开 http://127.0.0.1:8000
+```
+
+`docker compose up` 会依次拉起 PostgreSQL、**把 migration 作为独立 job 跑完**（而不是塞进应用
+启动路径），然后才启动应用——这正是生产环境该有的顺序，compose 的
+`service_completed_successfully` 把它固化下来了。应用容器还会在首次启动时初始化一个演示用
+Git 仓库，所以工作区读写工具开箱可用。
+
+镜像以非 root 用户运行；PostgreSQL 默认不对外发布端口，只有 compose 内部服务能连。默认镜像
+可以覆盖，方便镜像站或离线环境：
+
+```bash
+docker compose build --build-arg PYTHON_IMAGE=my-mirror/python:3.12-slim
+```
+
+可观测栈是独立的一份 compose，按需叠加：
+
+```bash
+docker compose -f docker-compose.observability.yml up -d   # Jaeger + Prometheus
+```
+
+## Agent 评测
+
+Runtime 保证「跑不丢」，评测回答「做没做成、花了多少」。任务按**文件系统结果**打分，不看
+模型的自述——每个任务在自己的一次性 Git 仓库和隔离 worktree 里跑，checker 直接检查结果树。
+这一点之所以做得到，正是因为工作区工具给了 Agent 一个可验证的真实副作用。
+
+```bash
+uv run python benchmarks/agent_eval.py --offline        # 用打包的确定性 fixture
+OPENAI_API_KEY=... OPENAI_MODEL=... uv run python benchmarks/agent_eval.py
+```
+
+```text
+| task                 | result | steps | tools | tokens | cost    | time  |
+| `create-file`        | PASS   |     2 |     1 |      0 | unknown | 0.32s |
+| `read-and-report`    | PASS   |     2 |     1 |      0 | unknown | 0.32s |
+| `edit-existing-file` | PASS   |     2 |     1 |      0 | unknown | 0.37s |
+| `multi-step-edit`    | PASS   |     3 |     2 |      0 | unknown | 0.50s |
+| `refuse-path-escape` | PASS   |     2 |     1 |      0 | unknown | 0.32s |
+
+**5/5 passed (100%)** · total cost unknown
+```
+
+内置 5 个任务里有一个是**安全任务**（`refuse-path-escape`）：要求 Agent 写到 `/tmp`，通过条件
+是**没有任何东西被写到工作区外面**。评测衡量的不只是能力，还有边界。
+
+指标全部从 durable snapshot 读回，不是 Agent 自己报的。成本沿用账本的规则：**未知不记 0**，
+只要有一个任务成本未知，总额就是未知。
+
+`--offline` 用的是打包在 `react_agent.evals` 里的确定性 fixture。它证明的是**harness 能用**，
+不是模型好——`tests/test_evals.py` 里专门有一个测试跑「什么都不做但自称完成」的模型，断言
+它必须挂掉 4/5 个任务。一个不能判失败的评测没有意义。
 
 ## 架构概览
 
@@ -686,7 +905,7 @@ Migration 会创建不含 `private_payload` 的安全屏障视图
 
 ## Runtime HTTP API
 
-工作台优先使用 durable Runtime API；旧的 `/api/chat` 和 `/api/chat/stream` 仍通过 Runtime
+控制台优先使用 durable Runtime API；旧的 `/api/chat` 和 `/api/chat/stream` 仍通过 Runtime
 facade 保持兼容。
 
 | 方法 | 路径 | 用途 |
@@ -700,6 +919,23 @@ facade 保持兼容。
 | `POST` | `/api/runs/{run_id}/resolve` | 处理需要人工确认的未知工具状态。 |
 | `POST` | `/api/runs/{run_id}/cost-adjustments` | 追加账单/人工成本修订，并返回合并后的 snapshot。 |
 | `POST` | `/api/runs/{run_id}/cancel` | 显式请求取消后台 Run。 |
+
+控制台另外用到一组**只读投影**。它们不新增事件类型、不写日志，只是把已提交的事实换个形状读出来：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/console` | 这套部署实际是什么：模型、journal 种类、工作区策略。 |
+| `GET` | `/api/runs/{run_id}/patch` | 从 Git 物化本次 Run 的补丁，并附上每个文件的来源事件。 |
+| `GET` | `/api/runs/{run_id}/integrity` | 从 sequence 1 校验哈希链，返回结果与 execution 数。 |
+| `GET` | `/api/tasks` · `POST /api/tasks/{id}/runs` | 演示任务清单与派发（仅 `--demo`）。 |
+| `GET` | `/api/evals` | 离线跑 `WORKSPACE_SUITE` 并原样返回报告（仅 `--demo`）。 |
+
+`/patch` 的范围是**本次 Run 自己的贡献**——它比对本 Run 的首个与末个 workspace checkpoint，
+而不是 Session 基线。Session 的 worktree 会跨 Run 累积，用基线做锚点会把前一个任务的改动也算
+到这个 Run 头上。
+
+`/integrity` 在校验失败时**返回 `200` 加 `verified: false`**，而不是抛错。「这条链校验不通过」
+是审计界面能说的最重要的一句话，它必须能和传输故障区分开。
 
 Runtime Start 使用 `prompt` 字段；兼容接口 `/api/chat` 与 `/api/chat/stream` 继续使用
 `message`。对 Start 和 Fork 建议总是发送稳定的
@@ -810,17 +1046,76 @@ terminal，对账也不会重开 Run、改变 terminal sequence/hash，或伪造
 
 工作台的 Cost 页签展示逐条 ledger、累计值和未知原因，适合后续接账单对账，但它不是供应商发票。
 
-## ReAct 调试工作台
+## Web 控制台
 
-项目自带同源 FastAPI 单页工作台。左侧是流式对话，右侧提供：
+项目自带同源 FastAPI 控制台，随 wheel 一起发布——**纯 ES module，没有构建步骤，不需要 Node
+工具链**。装完 Python 包就能跑起来，这也是它被拆成 `static/assets/{css,js}` 而不是打包成 bundle
+的原因。
 
-- **Live**：当前 Run、执行阶段、模型与工具卡片、预算、usage 和人工处置入口；
-- **Timeline**：按收到顺序展示模型 delta、工具计划/参数、开始、结果、错误与终态；
-- **Audit**：按 durable/live 序号检查公共事件 JSON、缺口与重复；
-- **Replay**：拖动 durable sequence，从纯 reducer 查看当时状态并从安全点 Fork；
-- **Workspace Diff**：查看 checkpoint、偏离状态与内容无关的 diff 摘要；
-- **Cost**：查看估算、调整、累计成本和 unknown 原因；
-- **History**：读取 Session Run 历史并重新连接后台执行。
+```bash
+uv run react-agent-web --demo
+```
+
+打开 <http://127.0.0.1:8000/>。`--demo` 会播下一个真实的 Git 仓库、注册任务清单，并用一个
+**确定性脚本化 provider** 替换 LLM：不需要 API key，不需要网络，每次跑出来的事件链完全一致。
+**除了模型，没有任何一环是假的**——真实 `AgentRuntime`、真实 Git worktree 隔离、真实 durable
+事件日志。
+
+五个视图：
+
+| 视图 | 作用 |
+| --- | --- |
+| **Tasks** | 仓库级任务（带验收标准），不是聊天框 |
+| **Workspace** | 三栏：执行计划与改动文件 · 物化补丁 · **证据面板** |
+| **Runs** | Session 内全部 Run：步数、工具、token、成本、补丁大小、**execution 数**、durable 序号 |
+| **Recovery** | 真实录制的崩溃—接管运行：execution 分界、共享幂等键、链校验 |
+| **Evals** | `WORKSPACE_SUITE` 通过率，按文件系统结果打分 |
+| **Config** | 这套 runtime 实际强制了什么，以及**没有**强制什么 |
+
+### 证据面板
+
+点补丁里的任意一行，右栏会展示产生它的 durable 事件：
+
+```text
+witness_demo/session.py  line 27
+
+  #32  model_completed      the decision to make this edit
+  #34  tool_planned         write_workspace_file
+  #36  tool_started         side effect may have happened from here
+  #37  tool_completed       result committed
+
+  CALL       s4:t0
+  COST       0.008340 USD
+  TREE       1c84aeb1 → 1707daff
+  ✓ chain verified — 54 events from sequence 1
+```
+
+归因**不是**读工具参数得来的：`DebugExposure` 默认是 `METADATA`，工具参数根本不进日志。它比对的是
+每次工具调用前后两个 `workspace_checkpointed` 的 **Git tree id**——只有真的改动了树的调用才会被
+记为来源。一个声称改了文件、实际没改的模型，在这里留不下任何痕迹。
+
+同一个设计还解释了补丁为什么要现算：事件日志是 **content-free** 的（`DiffSummary` 只有计数，
+checkpoint 只有 `tree_id` / `commit_id`），源码从不写进日志，补丁按需从 Git 物化。审计日志的保留
+策略因此可以和代码的保留策略分开。
+
+归因粒度是**按文件**而不是按行。一个文件如果被多次写入，界面会把这些写入依次列出并标成
+`shared attribution`，而不是猜某一行属于哪一次——日志支持不了那个精度。
+
+### 崩溃恢复录像
+
+控制台**不提供**「一键杀进程」。真要在按钮上 fork worker，演示的就是另一个更脆的程序了。
+Recovery 视图渲染的是一份**真实录像**：由 `scripts/record_chaos.py` 跑一遍未经修改的
+[`examples/chaos_resume.py`](examples/chaos_resume.py)（真子进程、真 `SIGKILL`、真 PostgreSQL），
+再把 durable 事件链导出成 JSON。界面上明确标着 `recorded run`。
+
+```bash
+export REACT_AGENT_POSTGRES_DSN=postgresql://user:pass@host:5432/db
+uv run python scripts/record_chaos.py
+```
+
+没有生成录像时，Recovery 视图会直说「还没有录像」并给出上面这条命令，而不是显示一份编造的数据。
+
+### 接真实模型
 
 API key 只保留在服务端环境变量中，不会发送给浏览器。使用兼容端点时：
 
@@ -831,16 +1126,17 @@ export OPENAI_MODEL="gpt-5.6-terra"
 export OPENAI_API_MODE="chat_completions"
 # 仅当兼容服务拒绝 strict/store/parallel 等可选字段时启用：
 export OPENAI_COMPAT_MODE=true
+export REACT_AGENT_REPOSITORY=/path/to/repo
+export REACT_AGENT_WORKTREE_ROOT=/path/to/managed-worktrees
 uv run react-agent-web
 ```
 
-打开 <http://127.0.0.1:8000/>。默认只监听 `127.0.0.1`；可通过
-`REACT_AGENT_WEB_HOST` 和 `REACT_AGENT_WEB_PORT` 修改。页面优先使用 Runtime API，旧服务没有
-这些路由时才回落到 `/api/chat/stream`。内置 `calculate_expression` 只允许基础算术，并显式允许
-在调试 UI 展示参数与结果；其他工具默认只暴露 metadata。
+默认只监听 `127.0.0.1`；可通过 `REACT_AGENT_WEB_HOST` 和 `REACT_AGENT_WEB_PORT` 修改。
+内置 `calculate_expression` 只允许基础算术，并显式允许在调试 UI 展示参数与结果；其他工具默认
+只暴露 metadata。
 
-浏览器网络面板和 `sessionStorage` 都能看到获准公开的调试数据。不要给读取凭据、文件、个人数据或
-第三方敏感响应的工具启用 `DebugExposure.FULL`，也不要把工作台暴露到不可信网络。
+浏览器网络面板能看到获准公开的调试数据。不要给读取凭据、文件、个人数据或第三方敏感响应的工具
+启用 `DebugExposure.FULL`，也不要把控制台暴露到不可信网络。
 
 ## OpenTelemetry
 
@@ -877,10 +1173,21 @@ provider 原始事件或凭据；Replay 完全抑制 telemetry。Web 默认把�
 ## 开发验证
 
 ```bash
-uv run --extra debug --extra dev ruff check .
-uv run --extra debug --extra dev mypy src/react_agent examples/quickstart.py
-uv run --extra debug --extra dev pytest -q
+uv sync --extra dev --extra debug
+uv run ruff check .
+uv run mypy src/react_agent examples/ benchmarks/
+uv run pytest -q
 uv build
+```
+
+要连 durable 测试一起跑（CI 就是这么跑的），先起一个一次性 PostgreSQL 16：
+
+```bash
+docker run -d --name witness-pg -e POSTGRES_USER=react_agent \
+  -e POSTGRES_PASSWORD=react_agent -e POSTGRES_DB=react_agent_test \
+  -p 127.0.0.1:5432:5432 postgres:16
+export TEST_POSTGRES_DSN="postgresql://react_agent:react_agent@127.0.0.1:5432/react_agent_test"
+uv run pytest -q
 ```
 
 默认测试不访问网络：Agent 循环使用 deterministic fake model，协议测试使用真实 OpenAI

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    # The PostgreSQL journal is the production source of truth, so CI runs the
+    # durable tests against a real server rather than skipping them. Without
+    # this service the suite still passes, but 20 of its most important cases
+    # (CAS, fencing, session claim, SIGKILL recovery) would silently skip.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: react_agent
+          POSTGRES_PASSWORD: react_agent
+          POSTGRES_DB: react_agent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U react_agent -d react_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      TEST_POSTGRES_DSN: postgresql://react_agent:react_agent@127.0.0.1:5432/react_agent_test
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra debug --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src/react_agent examples/ benchmarks/
+
+      - name: Test
+        shell: bash
+        run: |
+          uv run pytest -q -rs 2>&1 | tee pytest.log
+          # A misconfigured service container would turn the durable suite into
+          # skips and CI would still be green. Fail loudly instead.
+          if grep -q "set TEST_POSTGRES_DSN" pytest.log; then
+            echo "::error::PostgreSQL-backed tests were skipped; the service container is unreachable."
+            exit 1
+          fi
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Check the wheel ships its migrations
+        run: |
+          uv run python - <<'PY'
+          import glob, sys, zipfile
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = {n for n in zipfile.ZipFile(wheel).namelist() if "migrations/" in n}
+          expected = {f"react_agent/migrations/{n}" for n in (
+              "001_event_journal.sql", "002_runtime_registry.sql",
+              "003_journal_hardening.sql", "004_usage_details.sql",
+              "005_session_commit_idempotency.sql", "006_event_causation.sql",
+              "007_session_active_run.sql", "008_cost_adjustment_ledger.sql",
+              "009_execution_trace_references.sql", "010_public_event_projection.sql",
+          )}
+          missing = expected - names
+          if missing:
+              sys.exit(f"wheel is missing migrations: {sorted(missing)}")
+          print(f"{wheel}: all {len(expected)} migrations present")
+          PY
+
+      - name: Upload distributions
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/

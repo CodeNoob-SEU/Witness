@@ -301,7 +301,8 @@ def make_workspace(tmp_path: Path) -> tuple[Path, Path]:
 async def marked_processes(marker: str) -> tuple[int, ...]:
     process = await asyncio.create_subprocess_exec(
         "ps",
-        "-axo",
+        "-axww",
+        "-o",
         "pid=,command=",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,

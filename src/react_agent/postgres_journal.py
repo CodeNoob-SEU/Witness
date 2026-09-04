@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,7 @@ from .cost_ledger import (
 from .events import (
     GENESIS_HASH,
     TERMINAL_EVENT_KINDS,
+    EventValidationError,
     PrivacyClass,
     RunEventDraft,
     RunEventKind,
@@ -34,6 +38,7 @@ from .events import (
     StoredRunEvent,
     canonical_json,
     fold_events,
+    fold_events_from,
 )
 from .journal import (
     JournalError,
@@ -105,6 +110,15 @@ def _json_value(value: object) -> object:
 
 
 def _snapshot_payload(snapshot: RunSnapshot) -> dict[str, object]:
+    """Return the observability projection stored alongside the event log.
+
+    Deliberately metadata only. Copying the folded transcript here would
+    re-serialize the whole conversation on every append — O(n) write per event,
+    O(n^2) per run — and would duplicate private checkpoint content into a
+    second table with its own grants and backups. Recovery never reads this
+    row; it folds the events.
+    """
+
     return {
         "run_id": snapshot.run_id,
         "session_id": snapshot.session_id,
@@ -114,7 +128,7 @@ def _snapshot_payload(snapshot: RunSnapshot) -> dict[str, object]:
         "state": snapshot.state.value,
         "status": snapshot.status,
         "stop_reason": snapshot.stop_reason,
-        "transcript": _json_value(snapshot.transcript),
+        "transcript_items": len(snapshot.transcript),
         "usage": {
             "input_tokens": snapshot.usage.input_tokens,
             "output_tokens": snapshot.usage.output_tokens,
@@ -147,6 +161,94 @@ def _snapshot_payload(snapshot: RunSnapshot) -> dict[str, object]:
     }
 
 
+class _NotificationHub:
+    """One shared ``LISTEN`` connection that wakes every follower in-process.
+
+    ``wait`` used to open, subscribe on, and close a dedicated connection per
+    call.  A follower polls continuously, so that churned several PostgreSQL
+    connections per second per open stream and bypassed the pool's bounds
+    entirely.  One connection per journal serves every local waiter instead.
+
+    Notifications remain hints.  Waiters always re-query the sequence-ordered
+    journal, so a hub that cannot connect, or that loses its connection, only
+    costs latency: callers fall back to their poll interval.
+    """
+
+    def __init__(self, dsn: str, *, retry_interval_s: float) -> None:
+        self._dsn = dsn
+        self._retry_interval_s = retry_interval_s
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task[None] | None = None
+        self._wake = asyncio.Event()
+        self._retry_after = 0.0
+        self._closed = False
+
+    async def arm(self) -> asyncio.Event:
+        """Return the event to await; call before reading to avoid lost wakeups.
+
+        A commit that lands between a caller's read and its sleep still fires
+        the event captured here, which is the same guarantee the previous
+        ``LISTEN``-before-``SELECT`` ordering provided.
+        """
+
+        await self._ensure_listening()
+        return self._wake
+
+    async def _ensure_listening(self) -> None:
+        if self._closed or (self._task is not None and not self._task.done()):
+            return
+        async with self._lock:
+            if self._closed or (self._task is not None and not self._task.done()):
+                return
+            if time.monotonic() < self._retry_after:
+                return
+            self._retry_after = time.monotonic() + self._retry_interval_s
+            try:
+                connection: AsyncConnection[dict[str, Any]] = await AsyncConnection.connect(
+                    self._dsn,
+                    autocommit=True,
+                    row_factory=dict_row,
+                )
+            except Exception:
+                # Fail open: waiters degrade to polling on their own timeout.
+                return
+            self._task = asyncio.create_task(
+                self._listen(connection),
+                name="react-agent-journal-listen",
+            )
+
+    async def _listen(self, connection: AsyncConnection[dict[str, Any]]) -> None:
+        try:
+            await connection.execute("LISTEN react_agent_events")
+            async for _ in connection.notifies():
+                self._release_waiters()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            # Release anyone parked on a hub that just died so they re-poll
+            # instead of sleeping out their full timeout on a dead connection.
+            self._release_waiters()
+            with suppress(Exception):
+                await connection.close()
+
+    def _release_waiters(self) -> None:
+        armed = self._wake
+        self._wake = asyncio.Event()
+        armed.set()
+
+    async def close(self) -> None:
+        self._closed = True
+        async with self._lock:
+            task = self._task
+            self._task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._release_waiters()
+
+
 class PostgresRunJournal:
     """Transactional PostgreSQL journal with CAS, fencing, and durable replay.
 
@@ -161,6 +263,7 @@ class PostgresRunJournal:
         min_size: int = 1,
         max_size: int = 10,
         poll_interval_s: float = 0.2,
+        max_cached_folds: int = 128,
     ) -> None:
         if not dsn.strip():
             raise ValueError("PostgreSQL DSN must not be blank")
@@ -168,8 +271,16 @@ class PostgresRunJournal:
             raise ValueError("invalid PostgreSQL pool bounds")
         if poll_interval_s <= 0:
             raise ValueError("poll_interval_s must be positive")
+        if max_cached_folds < 0:
+            raise ValueError("max_cached_folds must be non-negative")
         self._dsn = dsn
         self._poll_interval_s = poll_interval_s
+        self._max_cached_folds = max_cached_folds
+        # Reducer state this process folded from a chain it verified itself.
+        # Never populated from stored projections: trusting those would let a
+        # forged row stand in for history, which the hash chain exists to stop.
+        self._folds: OrderedDict[str, RunSnapshot] = OrderedDict()
+        self._notifications = _NotificationHub(dsn, retry_interval_s=poll_interval_s)
         self._pool: AsyncConnectionPool[AsyncConnection[dict[str, Any]]] = AsyncConnectionPool(
             conninfo=dsn,
             min_size=min_size,
@@ -189,7 +300,59 @@ class PostgresRunJournal:
         await self._pool.open(wait=True)
 
     async def close(self) -> None:
+        await self._notifications.close()
+        self._folds.clear()
         await self._pool.close()
+
+    def _cached_fold(self, run_id: str) -> RunSnapshot | None:
+        snapshot = self._folds.get(run_id)
+        if snapshot is not None:
+            # Refresh recency so an active run stays cached under pressure.
+            self._folds.move_to_end(run_id)
+        return snapshot
+
+    def _remember_fold(self, snapshot: RunSnapshot) -> None:
+        self._folds[snapshot.run_id] = snapshot
+        self._folds.move_to_end(snapshot.run_id)
+        while len(self._folds) > self._max_cached_folds:
+            self._folds.popitem(last=False)
+
+    async def _fold_with_new_events(
+        self,
+        connection: AsyncConnection[dict[str, Any]],
+        run_id: str,
+        new_events: Sequence[StoredRunEvent],
+        *,
+        previous_hash: str,
+    ) -> RunSnapshot:
+        """Fold the run including ``new_events``, re-reading history only if needed.
+
+        Re-reading and re-folding every row on each append is O(n) per event and
+        O(n^2) per run. The cached prefix may only be used when it provably ends
+        exactly where these events begin, so a concurrent writer or a stale
+        cache falls back to the authoritative full fold instead of guessing.
+        """
+
+        first = new_events[0]
+        cached = self._cached_fold(run_id)
+        if (
+            cached is not None
+            and cached.last_sequence == first.sequence - 1
+            and cached.last_hash == previous_hash
+        ):
+            return fold_events_from(cached, new_events)
+        cursor = await connection.execute(
+            """
+            SELECT * FROM react_agent_run_events
+            WHERE run_id = %s ORDER BY sequence
+            """,
+            (run_id,),
+        )
+        rows = await cursor.fetchall()
+        history = tuple(self._event_from_row(row) for row in rows)
+        committed = {event.sequence for event in history}
+        missing = tuple(event for event in new_events if event.sequence not in committed)
+        return fold_events((*history, *missing))
 
     async def migrate(self) -> None:
         """Apply bundled idempotent migrations in lexical order."""
@@ -1064,15 +1227,12 @@ class PostgresRunJournal:
                     ),
                 )
                 await self._insert_event(connection, event, payload_hash=payload_hash)
-                all_rows_cursor = await connection.execute(
-                    """
-                    SELECT * FROM react_agent_run_events
-                    WHERE run_id = %s ORDER BY sequence
-                    """,
-                    (run_id,),
+                snapshot = await self._fold_with_new_events(
+                    connection,
+                    run_id,
+                    (event,),
+                    previous_hash=previous_event.event_hash,
                 )
-                all_rows = await all_rows_cursor.fetchall()
-                snapshot = fold_events(tuple(self._event_from_row(row) for row in all_rows))
                 await self._store_snapshot(connection, snapshot)
                 await connection.execute(
                     """
@@ -1107,7 +1267,11 @@ class PostgresRunJournal:
                     "SELECT pg_notify('react_agent_events', %s)",
                     (f"{run_id}:{event.sequence}",),
                 )
-                return event
+        # Cache only after the transaction commits. Remembering a snapshot the
+        # database rolled back would make later reads return state that never
+        # existed, which is exactly the failure the journal is meant to rule out.
+        self._remember_fold(snapshot)
+        return event
 
     async def append_many(
         self,
@@ -1219,7 +1383,12 @@ class PostgresRunJournal:
                     committed_history.append(event)
                     previous_event = event
 
-                snapshot = fold_events(tuple(committed_history))
+                snapshot = await self._fold_with_new_events(
+                    connection,
+                    run_id,
+                    tuple(new_events),
+                    previous_hash=new_events[0].previous_hash,
+                )
                 for event, payload_hash in zip(
                     new_events,
                     payload_hashes,
@@ -1265,7 +1434,8 @@ class PostgresRunJournal:
                     "SELECT pg_notify('react_agent_events', %s)",
                     (f"{run_id}:{final_event.sequence}",),
                 )
-                return tuple(new_events)
+        self._remember_fold(snapshot)
+        return tuple(new_events)
 
     async def read(self, run_id: str, *, after_sequence: int = 0) -> tuple[StoredRunEvent, ...]:
         if after_sequence < 0:
@@ -1300,12 +1470,38 @@ class PostgresRunJournal:
         return tuple(cls._event_from_row(row) for row in rows)
 
     async def load(self, run_id: str) -> RunSnapshot:
-        events = await self.read(run_id)
-        return fold_events(events)
+        """Fold the run, reading only the events this process has not folded yet.
+
+        The cache holds reducer state derived from a chain this process already
+        verified, so continuing from it is exactly equivalent to folding from
+        sequence 1 — the tail's hash link back into the cached prefix is still
+        checked on every call. Nothing here trusts stored projections.
+        """
+
+        cached = self._cached_fold(run_id)
+        if cached is None:
+            snapshot = fold_events(await self.read(run_id))
+            self._remember_fold(snapshot)
+            return snapshot
+
+        tail = await self.read(run_id, after_sequence=cached.last_sequence)
+        if not tail:
+            return cached
+        try:
+            snapshot = fold_events_from(cached, tail)
+        except EventValidationError:
+            # The cached prefix could not be joined to what the journal now
+            # holds. Never repair a chain from memory: drop the cache and let
+            # the authoritative full fold decide whether the log is corrupt.
+            self._folds.pop(run_id, None)
+            snapshot = fold_events(await self.read(run_id))
+        self._remember_fold(snapshot)
+        return snapshot
 
     async def evict_snapshot(self, run_id: str) -> bool:
         """Delete only the rebuildable projection for a retained run."""
 
+        self._folds.pop(run_id, None)
         async with self._pool.connection() as connection:
             async with connection.transaction():
                 deleted = await connection.execute(
@@ -1435,47 +1631,36 @@ class PostgresRunJournal:
         if timeout_s is not None and timeout_s < 0:
             raise ValueError("timeout_s must be non-negative or None")
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
-        listener: AsyncConnection[dict[str, Any]] = await AsyncConnection.connect(
-            self._dsn,
-            autocommit=True,
-            row_factory=dict_row,
-        )
-        try:
-            await listener.execute("LISTEN react_agent_events")
-            # Query only after LISTEN is committed (autocommit) to close the
-            # classic read-then-subscribe lost-wakeup window.
-            while True:
+        while True:
+            # Arm before reading. A commit that lands between this read and the
+            # sleep below still fires the captured event, which is the same
+            # lost-wakeup guarantee as subscribing before the first SELECT.
+            wake = await self._notifications.arm()
+            async with self._pool.connection() as connection:
                 events = await self._read_from_connection(
-                    listener, run_id, after_sequence=after_sequence
+                    connection, run_id, after_sequence=after_sequence
                 )
                 if events:
                     return events
-                if await self._is_terminal_on_connection(listener, run_id):
+                if await self._is_terminal_on_connection(connection, run_id):
                     # A terminal append may commit between the event read and
                     # status check. Always re-read durable rows before saying a
                     # terminal follower is permanently caught up.
-                    events = await self._read_from_connection(
-                        listener, run_id, after_sequence=after_sequence
+                    return await self._read_from_connection(
+                        connection, run_id, after_sequence=after_sequence
                     )
-                    if events:
-                        return events
+            if deadline is None:
+                wake_timeout = self._poll_interval_s
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     return ()
-                if deadline is None:
-                    wake_timeout = self._poll_interval_s
-                else:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return ()
-                    wake_timeout = min(self._poll_interval_s, remaining)
-                # Notifications are hints only: any payload wakes us, and each
-                # wake (or timeout) re-queries the sequence-ordered journal.
-                async for _ in listener.notifies(
-                    timeout=wake_timeout,
-                    stop_after=1,
-                ):
-                    break
-        finally:
-            await listener.close()
+                wake_timeout = min(self._poll_interval_s, remaining)
+            # Notifications are hints only: any payload wakes us, and each wake
+            # (or timeout) re-queries the sequence-ordered journal.
+            with suppress(TimeoutError):
+                async with asyncio.timeout(wake_timeout):
+                    await wake.wait()
 
     async def set_lineage(
         self,

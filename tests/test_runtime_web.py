@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 from dataclasses import replace
-from pathlib import Path
 from typing import ClassVar, cast
 
 import httpx
@@ -338,7 +337,7 @@ async def test_owned_web_runtime_passes_bounded_metric_policy_to_telemetry(
     monkeypatch.setattr(
         web_module,
         "_build_agent_from_env",
-        lambda: (model, agent, "gpt-5.6-terra", "chat_completions"),
+        lambda **_: (model, agent, "gpt-5.6-terra", "chat_completions"),
     )
     policies: list[MetricCardinalityPolicy] = []
 
@@ -408,7 +407,7 @@ async def test_explicit_postgres_dsn_wins_and_pool_follows_app_lifespan(
     monkeypatch.setattr(
         web_module,
         "_build_agent_from_env",
-        lambda: (model, agent, "offline-runtime", "chat_completions"),
+        lambda **_: (model, agent, "offline-runtime", "chat_completions"),
     )
     app = create_app()
 
@@ -1018,17 +1017,17 @@ async def test_missing_run_is_a_preflight_http_404_not_an_sse_error() -> None:
 
 
 def test_repository_tools_are_registered_only_with_a_managed_workspace(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("REACT_AGENT_REPOSITORY", raising=False)
     monkeypatch.delenv("REACT_AGENT_COMMAND_APPROVAL", raising=False)
-    assert [t.name for t in web_module._tools_from_env()] == ["calculate_expression"]
-    assert web_module._agent_config_from_env(ContextStrategy.TIERED).max_steps == 8
+    names = [t.name for t in web_module._tools_from_env(workspace_enabled=False)]
+    assert names == ["calculate_expression"]
+    config = web_module._agent_config_from_env(ContextStrategy.TIERED, workspace_enabled=False)
+    assert config.max_steps == 8
 
-    monkeypatch.setenv("REACT_AGENT_REPOSITORY", str(tmp_path / "repo"))
     monkeypatch.setenv("REACT_AGENT_COMMAND_APPROVAL", "true")
-    names = [t.name for t in web_module._tools_from_env()]
-    assert names == [
+    tools = web_module._tools_from_env(workspace_enabled=True)
+    assert [t.name for t in tools] == [
         "calculate_expression",
         "list_dir",
         "read_file",
@@ -1038,7 +1037,7 @@ def test_repository_tools_are_registered_only_with_a_managed_workspace(
         "run_tests",
         "run_command",
     ]
-    run_command = next(t for t in web_module._tools_from_env() if t.name == "run_command")
+    run_command = next(t for t in tools if t.name == "run_command")
     assert run_command.requires_approval is True
-    config = web_module._agent_config_from_env(ContextStrategy.TIERED)
+    config = web_module._agent_config_from_env(ContextStrategy.TIERED, workspace_enabled=True)
     assert config.max_steps == 60 and config.max_wall_time_s == 3_600.0

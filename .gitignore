@@ -13,3 +13,6 @@ build/
 .private-debug-events*.json
 .DS_Store
 output/
+
+# Local Claude Code preview config: contains machine-specific absolute paths.
+.claude/launch.json

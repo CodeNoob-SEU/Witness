@@ -2993,3 +2993,87 @@ async def test_session_rejects_a_second_run_before_session_commit_race() -> None
     assert started == 1
     assert len(session.transcript) == 2
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_finished_runs_do_not_grow_process_local_state_without_bound() -> None:
+    journal = InMemoryRunJournal()
+    runtime = AgentRuntime(
+        ReActAgent(ScriptedModel()),
+        journal,
+        max_retained_runs=2,
+    )
+
+    run_ids: list[str] = []
+    for index in range(5):
+        model = ScriptedModel(ModelResponse(AssistantMessage(f"answer {index}")))
+        runtime.agent = ReActAgent(model)
+        handle = await runtime.submit(
+            StartRun(prompt=f"question {index}", session_id=f"retention-{index}")
+        )
+        await runtime.wait(handle.run_id, timeout_s=2)
+        run_ids.append(handle.run_id)
+
+    # A finished run keeps no live bus, no in-process result and no traceback:
+    # every one of those is rebuildable from the durable journal.
+    assert len(runtime._buses) <= 2
+    assert len(runtime._results) <= 2
+    assert len(runtime._task_errors) <= 2
+
+    # Eviction is a cache policy, never a loss of fact. Each run still folds
+    # from sequence 1 with its answer intact.
+    for index, run_id in enumerate(run_ids):
+        snapshot = await runtime.load(run_id)
+        assert snapshot.status == "completed"
+        assert snapshot.result is not None
+        assert snapshot.result["output"] == f"answer {index}"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_pruning_never_evicts_a_still_executing_run() -> None:
+    journal = InMemoryRunJournal()
+    blocking = BlockingModel()
+    runtime = AgentRuntime(ReActAgent(blocking), journal, max_retained_runs=1)
+
+    running = await runtime.submit(
+        StartRun(prompt="stay running", session_id="live-session")
+    )
+    await asyncio.wait_for(blocking.started.wait(), timeout=2)
+    live_bus = runtime._buses.setdefault(running.run_id, runtime_module._LiveBus())
+
+    for index in range(4):
+        model = ScriptedModel(ModelResponse(AssistantMessage(f"done {index}")))
+        runtime.agent = ReActAgent(model)
+        handle = await runtime.submit(
+            StartRun(prompt=f"short {index}", session_id=f"short-{index}")
+        )
+        await runtime.wait(handle.run_id, timeout_s=2)
+
+    # The in-flight producer already bound this bus; evicting it would split it
+    # from any follower that attaches afterwards.
+    assert runtime._buses.get(running.run_id) is live_bus
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_history_reads_do_not_register_live_buses() -> None:
+    journal = InMemoryRunJournal()
+    runtime = AgentRuntime(
+        ReActAgent(ScriptedModel(ModelResponse(AssistantMessage("archived")))),
+        journal,
+    )
+    handle = await runtime.submit(StartRun(prompt="archive me", session_id="history"))
+    await runtime.wait(handle.run_id, timeout_s=2)
+    runtime._buses.clear()
+
+    replayed = [
+        event
+        async for event in runtime.follow(handle.run_id, live=False)
+    ]
+
+    assert replayed[0].kind == "run_started"
+    assert replayed[-1].terminal is True
+    # Browsing history must not attach process-local state to every run id.
+    assert runtime._buses == {}
+    await runtime.close()

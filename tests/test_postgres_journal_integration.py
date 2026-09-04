@@ -21,6 +21,7 @@ from react_agent.events import (
     RunEventKind,
     StoredRunEvent,
     compute_event_hash,
+    fold_events,
     upcast_events,
     verify_event_chain,
 )
@@ -1554,3 +1555,90 @@ async def test_migrations_001_through_010_apply_in_order_to_empty_schema() -> No
             sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema_name))
         )
         await admin.close()
+
+
+@pytest.mark.asyncio
+async def test_incremental_fold_cache_never_hides_another_writers_events() -> None:
+    """A warm cache is an optimisation, never a private view of the run."""
+
+    reader = await open_journal()
+    writer = await open_journal()
+    run_id = unique_id("fold-cache-run")
+    session_id = unique_id("fold-cache-session")
+    try:
+        await writer.create(run_id, run_started(session_id), operation_id="run:started")
+        lease = await writer.acquire(run_id, owner="writer", ttl_s=60)
+
+        # Warm the reader's cache at sequence 1.
+        first = await reader.load(run_id)
+        assert first.last_sequence == 1
+
+        for index in range(2, 6):
+            await writer.append(
+                run_id,
+                RunEventDraft(
+                    kind=RunEventKind.MODEL_STARTED,
+                    step=index,
+                    data={"attempt": 1},
+                ),
+                expected_sequence=index - 1,
+                operation_id=f"model-{index}",
+                lease=lease,
+            )
+
+        # The reader folded from its own cached prefix; it must still observe
+        # every fact another process committed in the meantime.
+        refreshed = await reader.load(run_id)
+        assert refreshed.last_sequence == 5
+        assert refreshed.counts.model_calls == 0
+        assert refreshed == fold_events(await reader.read(run_id))
+
+        # Evicting the cache must not change any answer, only the cost.
+        assert await reader.evict_snapshot(run_id) is True
+        assert await reader.load(run_id) == refreshed
+
+        # And the writer's own cache stays consistent with a cold full fold.
+        assert await writer.load(run_id) == refreshed
+    finally:
+        await reader.close()
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_back_append_leaves_no_trace_in_the_fold_cache() -> None:
+    """A snapshot may only be cached after its transaction actually commits."""
+
+    journal = await open_journal()
+    run_id = unique_id("rollback-run")
+    session_id = unique_id("rollback-session")
+    try:
+        await journal.create(run_id, run_started(session_id), operation_id="run:started")
+        lease = await journal.acquire(run_id, owner="writer", ttl_s=60)
+        await journal.append(
+            run_id,
+            RunEventDraft(kind=RunEventKind.MODEL_STARTED, step=1, data={"attempt": 1}),
+            expected_sequence=1,
+            operation_id="model-1",
+            lease=lease,
+        )
+        healthy = await journal.load(run_id)
+
+        # Lose the CAS race: this append must roll back entirely.
+        with pytest.raises(SequenceConflictError):
+            await journal.append(
+                run_id,
+                RunEventDraft(
+                    kind=RunEventKind.MODEL_COMPLETED,
+                    step=1,
+                    data={"attempt": 1, "outcome": "completed"},
+                ),
+                expected_sequence=99,
+                operation_id="model-1-completed",
+                lease=lease,
+            )
+
+        assert await journal.load(run_id) == healthy
+        assert await journal.evict_snapshot(run_id) is True
+        assert await journal.load(run_id) == healthy
+    finally:
+        await journal.close()

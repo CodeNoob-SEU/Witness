@@ -525,20 +525,66 @@ def compute_event_hash(event: StoredRunEvent) -> str:
     return _schema_stage(event.schema_version).compute_hash(event)
 
 
-def verify_event_chain(events: Sequence[StoredRunEvent]) -> None:
-    """Verify the original stored chain before any semantic conversion."""
+@dataclass(frozen=True, slots=True)
+class ChainAnchor:
+    """The verified tail of a chain prefix, used to check a continuation join.
+
+    Folding a long run from sequence 1 on every read is O(n) in both rows and
+    SHA-256 work. A caller that already verified a prefix can verify only the
+    tail, but it must then prove the two segments actually join: the anchor
+    carries the prefix's last hash and its immutable run identity so the join
+    is checked rather than assumed.
+    """
+
+    sequence: int
+    event_hash: str
+    run_id: str
+    session_id: str | None = None
+    agent_revision: str | None = None
+    tool_manifest_hash: str | None = None
+    terminal: bool = False
+
+    def __post_init__(self) -> None:
+        if self.sequence < 1:
+            raise EventSequenceError("anchor sequence must be positive")
+        if not self.event_hash.strip() or not self.run_id.strip():
+            raise EventValidationError("anchor identity must not be blank")
+
+
+def verify_event_chain(
+    events: Sequence[StoredRunEvent],
+    *,
+    anchor: ChainAnchor | None = None,
+) -> None:
+    """Verify the original stored chain before any semantic conversion.
+
+    With no ``anchor`` this verifies a complete run from its genesis link.
+    Passing one verifies only the events that follow an already-verified
+    prefix, including the hash link back into it.
+    """
 
     if not events:
         return
-    run_id = events[0].run_id
-    session_id = events[0].session_id
-    agent_revision = events[0].agent_revision
-    tool_manifest_hash = events[0].tool_manifest_hash
-    previous_hash = GENESIS_HASH
+    if anchor is None:
+        run_id = events[0].run_id
+        session_id = events[0].session_id
+        agent_revision = events[0].agent_revision
+        tool_manifest_hash = events[0].tool_manifest_hash
+        previous_hash = GENESIS_HASH
+        next_sequence = 1
+        terminal_seen = False
+    else:
+        run_id = anchor.run_id
+        session_id = anchor.session_id
+        agent_revision = anchor.agent_revision
+        tool_manifest_hash = anchor.tool_manifest_hash
+        previous_hash = anchor.event_hash
+        next_sequence = anchor.sequence + 1
+        terminal_seen = anchor.terminal
     operations: set[str] = set()
     event_ids: set[str] = set()
-    terminal_seen = False
-    for expected_sequence, event in enumerate(events, start=1):
+    for offset, event in enumerate(events):
+        expected_sequence = next_sequence + offset
         stage = _schema_stage(event.schema_version)
         if event.run_id != run_id:
             raise EventSequenceError("one chain cannot contain multiple run ids")
@@ -608,7 +654,11 @@ def _upcast_verified_event(event: StoredRunEvent) -> StoredRunEvent:
         current = converted
 
 
-def upcast_events(events: Sequence[StoredRunEvent]) -> tuple[StoredRunEvent, ...]:
+def upcast_events(
+    events: Sequence[StoredRunEvent],
+    *,
+    anchor: ChainAnchor | None = None,
+) -> tuple[StoredRunEvent, ...]:
     """Validate raw stored facts, then convert them to current reducer semantics.
 
     Hashes are always checked with the original schema codec. Upcasters run
@@ -616,7 +666,7 @@ def upcast_events(events: Sequence[StoredRunEvent]) -> tuple[StoredRunEvent, ...
     never repair or conceal a corrupt journal entry.
     """
 
-    verify_event_chain(events)
+    verify_event_chain(events, anchor=anchor)
     return tuple(_upcast_verified_event(event) for event in events)
 
 
@@ -754,41 +804,107 @@ def _workspace_anchor_from_first(
 def fold_events(events: Sequence[StoredRunEvent]) -> RunSnapshot:
     """Purely rebuild a run snapshot; never invokes a model, tool, or adapter."""
 
-    if not events:
-        raise EventSequenceError("cannot fold an empty run")
-    events = upcast_events(events)
-    if events[0].kind is not RunEventKind.RUN_STARTED:
-        raise EventSequenceError("the first run event must be run_started")
+    return fold_events_from(None, events)
 
-    first = events[0]
-    state = RunState.RUNNING
-    status: str | None = None
-    stop_reason: str | None = None
-    transcript: tuple[Mapping[str, Any], ...] = ()
-    usage = Usage()
-    counts = RunCounts()
-    pending: dict[str, PendingAction] = {}
-    safe_checkpoints: list[int] = []
-    terminal: StoredRunEvent | None = None
-    execution_id = first.execution_id
-    executions: list[str] = []
-    model_attempts: dict[int, int] = {}
-    tools: dict[str, ToolRecovery] = {}
-    loop_counts: dict[str, int] = {}
-    costs: list[Mapping[str, Any]] = []
-    workspace_anchor = _workspace_anchor_from_first(first)
-    workspace: Mapping[str, Any] | None = workspace_anchor
-    result_payload: Mapping[str, Any] | None = None
-    session_version: int | None = None
-    last_step = 0
-    parent_run_id = first.data.get("parent_run_id")
-    fork_sequence = first.data.get("fork_sequence")
-    if parent_run_id is not None and not isinstance(parent_run_id, str):
-        raise EventValidationError("parent_run_id must be a string")
-    if fork_sequence is not None and (
-        not isinstance(fork_sequence, int) or isinstance(fork_sequence, bool)
-    ):
-        raise EventValidationError("fork_sequence must be an integer")
+
+def fold_events_from(
+    snapshot: RunSnapshot | None,
+    events: Sequence[StoredRunEvent],
+) -> RunSnapshot:
+    """Continue a fold from an already-verified snapshot.
+
+    ``RunSnapshot`` is the reducer's complete state, so folding ``events`` onto
+    one is identical to folding the whole run from sequence 1 — but it reads and
+    re-hashes only the tail.
+
+    ``snapshot`` must have been produced by this module from a chain this
+    process already verified. Passing state recovered from storage would let a
+    forged projection stand in for history, which is exactly what the hash
+    chain exists to prevent.
+    """
+
+    if snapshot is None:
+        if not events:
+            raise EventSequenceError("cannot fold an empty run")
+        events = upcast_events(events)
+        if events[0].kind is not RunEventKind.RUN_STARTED:
+            raise EventSequenceError("the first run event must be run_started")
+        first = events[0]
+        state = RunState.RUNNING
+        status: str | None = None
+        stop_reason: str | None = None
+        transcript: tuple[Mapping[str, Any], ...] = ()
+        usage = Usage()
+        counts = RunCounts()
+        pending: dict[str, PendingAction] = {}
+        safe_checkpoints: list[int] = []
+        terminal: StoredRunEvent | None = None
+        execution_id = first.execution_id
+        executions: list[str] = []
+        model_attempts: dict[int, int] = {}
+        tools: dict[str, ToolRecovery] = {}
+        loop_counts: dict[str, int] = {}
+        costs: list[Mapping[str, Any]] = []
+        workspace_anchor = _workspace_anchor_from_first(first)
+        workspace: Mapping[str, Any] | None = workspace_anchor
+        result_payload: Mapping[str, Any] | None = None
+        session_version: int | None = None
+        last_step = 0
+        run_id = first.run_id
+        session_id = first.session_id
+        agent_revision = first.agent_revision
+        tool_manifest_hash = first.tool_manifest_hash
+        parent_run_id = first.data.get("parent_run_id")
+        fork_sequence = first.data.get("fork_sequence")
+        if parent_run_id is not None and not isinstance(parent_run_id, str):
+            raise EventValidationError("parent_run_id must be a string")
+        if fork_sequence is not None and (
+            not isinstance(fork_sequence, int) or isinstance(fork_sequence, bool)
+        ):
+            raise EventValidationError("fork_sequence must be an integer")
+        last_sequence = 0
+        last_hash = GENESIS_HASH
+    else:
+        anchor = ChainAnchor(
+            sequence=snapshot.last_sequence,
+            event_hash=snapshot.last_hash,
+            run_id=snapshot.run_id,
+            session_id=snapshot.session_id,
+            agent_revision=snapshot.agent_revision,
+            tool_manifest_hash=snapshot.tool_manifest_hash,
+            terminal=snapshot.terminal is not None,
+        )
+        events = upcast_events(events, anchor=anchor)
+        if not events:
+            return snapshot
+        state = snapshot.state
+        status = snapshot.status
+        stop_reason = snapshot.stop_reason
+        transcript = snapshot.transcript
+        usage = snapshot.usage
+        counts = snapshot.counts
+        pending = dict(snapshot.pending)
+        safe_checkpoints = list(snapshot.safe_checkpoint_sequences)
+        terminal = snapshot.terminal
+        execution_id = snapshot.execution_id
+        executions = list(snapshot.executions)
+        model_attempts = dict(snapshot.model_attempts)
+        tools = dict(snapshot.tools)
+        loop_counts = dict(snapshot.loop_counts)
+        costs = list(snapshot.costs)
+        workspace_anchor = snapshot.workspace_anchor
+        workspace = snapshot.workspace
+        result_payload = snapshot.result
+        session_version = snapshot.session_version
+        last_step = snapshot.last_step
+        run_id = snapshot.run_id
+        session_id = snapshot.session_id
+        agent_revision = snapshot.agent_revision
+        tool_manifest_hash = snapshot.tool_manifest_hash
+        parent_run_id = snapshot.parent_run_id
+        fork_sequence = snapshot.fork_sequence
+        last_sequence = snapshot.last_sequence
+        last_hash = snapshot.last_hash
 
     for event in events:
         if event.execution_id is not None:
@@ -1024,11 +1140,11 @@ def fold_events(events: Sequence[StoredRunEvent]) -> RunSnapshot:
             state = RunState.TERMINAL
 
     return RunSnapshot(
-        run_id=first.run_id,
-        session_id=first.session_id,
+        run_id=run_id,
+        session_id=session_id,
         execution_id=execution_id,
-        agent_revision=first.agent_revision,
-        tool_manifest_hash=first.tool_manifest_hash,
+        agent_revision=agent_revision,
+        tool_manifest_hash=tool_manifest_hash,
         state=state,
         status=status,
         stop_reason=stop_reason,
@@ -1038,8 +1154,8 @@ def fold_events(events: Sequence[StoredRunEvent]) -> RunSnapshot:
         pending=MappingProxyType(dict(pending)),
         safe_checkpoint_sequences=tuple(safe_checkpoints),
         terminal=terminal,
-        last_sequence=events[-1].sequence,
-        last_hash=events[-1].event_hash,
+        last_sequence=events[-1].sequence if events else last_sequence,
+        last_hash=events[-1].event_hash if events else last_hash,
         last_step=last_step,
         executions=tuple(executions),
         model_attempts=MappingProxyType(model_attempts),

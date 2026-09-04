@@ -173,3 +173,51 @@ async def test_tool_error_message_is_passed_through_but_other_exceptions_stay_op
     unexpected_payload = json.loads(unexpected.content)
     assert unexpected_payload["error"]["code"] == "TOOL_EXCEPTION"
     assert "hunter2" not in unexpected.content
+
+
+@pytest.mark.asyncio
+async def test_tool_data_naming_the_serialization_code_is_not_an_error() -> None:
+    @tool
+    def describe_error_codes(code: str) -> dict[str, str]:
+        """Return documentation for one framework error code."""
+
+        return {"code": code, "meaning": "the encoder could not serialize a result"}
+
+    registry = ToolRegistry([describe_error_codes])
+
+    message = await registry.execute(
+        ToolCall("call-1", "describe_error_codes", '{"code":"OUTPUT_SERIALIZATION"}'),
+        run_id="run-1",
+        approval_handler=None,
+        max_output_chars=2_000,
+    )
+
+    payload = json.loads(message.content)
+    assert payload["ok"] is True
+    assert payload["data"]["code"] == "OUTPUT_SERIALIZATION"
+    # The envelope succeeded; only the encoder failing may set is_error here.
+    assert message.is_error is False
+    assert message.executed is True
+
+
+@pytest.mark.asyncio
+async def test_unserializable_tool_result_is_still_reported_as_an_error() -> None:
+    @tool
+    def return_socket(label: str) -> object:
+        """Return a value the JSON encoder cannot represent."""
+
+        return {"label": label, "handle": object()}
+
+    registry = ToolRegistry([return_socket])
+
+    message = await registry.execute(
+        ToolCall("call-2", "return_socket", '{"label":"x"}'),
+        run_id="run-1",
+        approval_handler=None,
+        max_output_chars=2_000,
+    )
+
+    payload = json.loads(message.content)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "OUTPUT_SERIALIZATION"
+    assert message.is_error is True

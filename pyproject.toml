@@ -41,6 +41,7 @@ otel = [
 [project.scripts]
 react-agent = "react_agent.cli:main"
 react-agent-debug-mcp = "react_agent.debug_mcp:main"
+react-agent-migrate = "react_agent.migrate:main"
 react-agent-web = "react_agent.web:main"
 
 [tool.hatch.build.targets.wheel]
@@ -52,11 +53,14 @@ packages = ["src/react_agent"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 asyncio_mode = "auto"
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Archived evaluation artifacts are evidence, not library code.
+extend-exclude = ["analysis_outputs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
@@ -65,3 +69,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 python_version = "3.11"
 strict = true
 packages = ["react_agent"]
+
+[[tool.mypy.overrides]]
+# Optional heavy runtime of the live context A/B model server; not installed in CI.
+module = ["torch", "torch.*", "transformers", "transformers.*"]
+ignore_missing_imports = true
