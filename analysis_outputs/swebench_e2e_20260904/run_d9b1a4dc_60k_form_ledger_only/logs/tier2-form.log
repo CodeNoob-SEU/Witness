@@ -1,0 +1,54 @@
+[21:26:03] agent_revision=528a07f89836c1ec5282ab239d7a6690d1d1c334d4525e5dd71bcd152ac1890f manifest=9e8078a81e75932d5a9d3226dc8be8caff9847dd327abee82d59f0ff4d5889ef
+[21:26:03] RUN_ID=d9b1a4dc1bc3487eb8291dd970744972 created=True execution=af8bef5b1b1c5292be2d44c24783d258
+[21:27:02] state=waiting_model status=None seq=79 models=11 tools=7
+[21:28:01] state=running status=None seq=139 models=19 tools=12
+[21:28:59] state=running status=None seq=178 models=25 tools=15
+[21:29:58] state=running status=None seq=230 models=33 tools=19
+[21:30:56] state=waiting_model status=None seq=274 models=41 tools=22
+[21:31:55] state=waiting_model status=None seq=313 models=47 tools=25
+[21:32:54] state=running status=None seq=360 models=53 tools=29
+[21:33:53] state=waiting_model status=None seq=404 models=61 tools=32
+[21:34:51] state=running status=None seq=425 models=63 tools=34
+[21:35:50] state=running status=None seq=438 models=65 tools=35
+[21:36:48] state=running status=None seq=464 models=69 tools=37
+[21:37:47] state=running status=None seq=490 models=73 tools=39
+[21:38:45] state=waiting_model status=None seq=521 models=79 tools=41
+[21:39:44] state=running status=None seq=555 models=83 tools=44
+[21:40:43] state=running status=None seq=581 models=87 tools=46
+[21:41:41] state=waiting_model status=None seq=599 models=91 tools=47
+[21:42:40] state=running status=None seq=633 models=95 tools=50
+[21:43:38] state=running status=None seq=659 models=99 tools=52
+[21:44:37] state=running status=None seq=685 models=103 tools=54
+[21:45:36] state=running status=None seq=711 models=107 tools=56
+[21:46:35] state=running status=None seq=737 models=111 tools=58
+[21:47:16] state=terminal status=partial seq=765 models=115 tools=60
+{
+ "run_id": "d9b1a4dc1bc3487eb8291dd970744972",
+ "session_id": "pytest-7490-tier2-form",
+ "execution_id": "af8bef5b1b1c5292be2d44c24783d258",
+ "state": "terminal",
+ "status": "partial",
+ "stop_reason": "max_steps",
+ "last_sequence": 765,
+ "last_hash": "ce0f49475bf5ece0b452f758c72d2fffb6fda2845589cdd7eb7cdfd90968f807",
+ "last_step": 60,
+ "counts": {
+  "model_calls": 115,
+  "tool_calls": 60,
+  "tool_executions": 60
+ },
+ "usage": {
+  "input_tokens": 1473995,
+  "output_tokens": 51214,
+  "total_tokens": 1525209,
+  "cached_input_tokens": 24576,
+  "reasoning_output_tokens": 6834,
+  "billable_tokens": 1525209
+ },
+ "pending": {},
+ "executions": 1,
+ "model_attempts": 60,
+ "safe_checkpoints": 245,
+ "costs": 115,
+ "output": null
+}

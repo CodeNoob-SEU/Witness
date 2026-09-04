@@ -1,0 +1,20 @@
+{
+ "instance_id": "pytest-dev__pytest-7490",
+ "test_patch_applied": true,
+ "patch_output": "patching file testing/test_skipping.py\n",
+ "pytest_exit_code": 1,
+ "FAIL_TO_PASS": {
+  "passed": 0,
+  "total": 2,
+  "failing": [
+   "testing/test_skipping.py::TestXFail::test_dynamic_xfail_set_during_runtest_failed",
+   "testing/test_skipping.py::TestXFail::test_dynamic_xfail_set_during_runtest_passed_strict"
+  ]
+ },
+ "PASS_TO_PASS": {
+  "passed": 78,
+  "total": 78,
+  "failing": []
+ },
+ "resolved": false
+}

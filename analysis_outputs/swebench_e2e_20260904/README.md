@@ -104,5 +104,36 @@ a diagnosis of the old design: with recent reads blanked by the hard fallback, t
 the same file twenty-six times.
 
 Caveat: this replays the *inputs* of the old run; a model steering with the new form would have
-produced a different trajectory. A live 60k run with the new Tier 2 is the remaining experiment,
-and it is now cheap enough to be worth it.
+produced a different trajectory. The live runs below close that gap.
+
+## Live 60k runs with the working-state Tier 2 (`run_9c94f307_60k_form_otel`, `run_d9b1a4dc_60k_form_ledger_only`)
+
+Same instance, budget and relay as the 60k pressure run; `gpt-5.5` steers, `gpt-5.4-mini` writes
+the notes (`WITNESS_COMPRESSION_MODEL`), OTel on. Two runs, because the first one found a bug:
+
+| Run | What the model saw | Steps | Model calls (of which compressions) | Chars per compression | s per compression | Compression tokens | Total input tokens | Hard fallbacks | Wall | Result |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `run_bd04f7b3_tier2_60k_otel` (old prose Tier 2, for reference) | prose summary, newest tool outputs blanked | 40 (aborted) | 96 (44) | 35k → 202k | 104 | ~1.5M | 1.76M | 38 | 93 min | 0/2 |
+| `run_d9b1a4dc_60k_form_ledger_only` | goal + mechanical ledger only — notes were generated but **never persisted** (see below), so every step recompressed the whole prefix and no notes ever reached the model | 60 (`max_steps`) | 115 (55) | mean 129k, max 211k | 16.2 | 1.07M | 1.47M | 0 | 21 min | **0/2**, 78/78 |
+| `run_9c94f307_60k_form_otel` | goal + ledger + incrementally updated notes | 60 (`max_steps`) | 112 (52) | **mean 5.3k**, max 45k (first fold) | **7.9** | **110k** | **549k** | 0 | 15 min | **resolved** 2/2 + 78/78 |
+
+The bug: the harness pre-created `context-summaries/` with the default mode (0755), and
+`FileContextSummaryStore` refused every write as "not private" — but only at the first `put`, where
+the refusal degraded into a per-step `compression_error=ValueError` in the journal. No run today
+had persisted a single summary; the old design's "never a cache hit" was partly this too. `3b41bbb`
+makes the store reject a world-readable root at construction and the harness create it 0700.
+
+What the two live runs say:
+
+- With the notes actually reaching the model, the same 60k budget that was pathological in the
+  morning **resolved the task** — the hidden tests pass on the workspace at step 60 — while spending
+  a third of the input tokens of the ledger-only run and a tenth of its compression tokens. The
+  agent still ran out of steps (it kept re-running its selected tests rather than answering), so
+  `stop_reason=max_steps`; the 120k runs finished in 22–33 steps. A 60k budget with 30k-char tool
+  outputs and three raw recent turns forces re-reading (31 `read_file` calls, `x14` on
+  `skipping.py` in the final ledger); that is the remaining cost of the small budget, not of Tier 2.
+- The ledger alone is not enough: the ledger-only run read the same files, ran the same tests, and
+  never converged. The notes (findings / hypothesis / next steps) are what carry the reasoning
+  across the compression boundary.
+- `final_working_state.txt` is the exact 10.9k-char form the model saw before step 60: verbatim
+  goal, the ledger above, and notes whose every line can be checked against the transcript.

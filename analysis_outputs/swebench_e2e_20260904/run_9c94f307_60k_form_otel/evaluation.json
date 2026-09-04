@@ -1,0 +1,17 @@
+{
+ "instance_id": "pytest-dev__pytest-7490",
+ "test_patch_applied": true,
+ "patch_output": "patching file testing/test_skipping.py\n",
+ "pytest_exit_code": 0,
+ "FAIL_TO_PASS": {
+  "passed": 2,
+  "total": 2,
+  "failing": []
+ },
+ "PASS_TO_PASS": {
+  "passed": 78,
+  "total": 78,
+  "failing": []
+ },
+ "resolved": true
+}

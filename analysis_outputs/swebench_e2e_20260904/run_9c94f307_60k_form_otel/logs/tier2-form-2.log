@@ -1,0 +1,48 @@
+[21:51:38] agent_revision=528a07f89836c1ec5282ab239d7a6690d1d1c334d4525e5dd71bcd152ac1890f manifest=9e8078a81e75932d5a9d3226dc8be8caff9847dd327abee82d59f0ff4d5889ef
+[21:51:38] RUN_ID=9c94f307005d44b696a747353d5159ce created=True execution=9425ac84d1c55398ba175056b65c43f2
+[21:52:37] state=running status=None seq=88 models=10 tools=9
+[21:53:35] state=waiting_model status=None seq=145 models=20 tools=13
+[21:54:34] state=running status=None seq=192 models=26 tools=17
+[21:55:33] state=running status=None seq=244 models=34 tools=21
+[21:56:31] state=waiting_model status=None seq=288 models=42 tools=24
+[21:57:30] state=waiting_model status=None seq=340 models=50 tools=28
+[21:58:28] state=running status=None seq=400 models=58 tools=33
+[21:59:27] state=waiting_model status=None seq=444 models=66 tools=36
+[22:00:25] state=running status=None seq=491 models=72 tools=40
+[22:01:24] state=waiting_model status=None seq=522 models=78 tools=42
+[22:02:23] state=running status=None seq=569 models=84 tools=46
+[22:03:21] state=running status=None seq=621 models=92 tools=50
+[22:04:19] state=waiting_model status=None seq=652 models=98 tools=52
+[22:05:18] state=waiting_model status=None seq=691 models=104 tools=55
+[22:06:16] state=running status=None seq=738 models=110 tools=59
+[22:06:24] state=terminal status=partial seq=753 models=112 tools=60
+{
+ "run_id": "9c94f307005d44b696a747353d5159ce",
+ "session_id": "pytest-7490-tier2-form-2",
+ "execution_id": "9425ac84d1c55398ba175056b65c43f2",
+ "state": "terminal",
+ "status": "partial",
+ "stop_reason": "max_steps",
+ "last_sequence": 753,
+ "last_hash": "f22b61dd6327a96e9c12bc4e641954cf6cf65198e8b5aad4a6e4cdfce6094e70",
+ "last_step": 60,
+ "counts": {
+  "model_calls": 112,
+  "tool_calls": 60,
+  "tool_executions": 60
+ },
+ "usage": {
+  "input_tokens": 548565,
+  "output_tokens": 32521,
+  "total_tokens": 581086,
+  "cached_input_tokens": 59392,
+  "reasoning_output_tokens": 9668,
+  "billable_tokens": 581086
+ },
+ "pending": {},
+ "executions": 1,
+ "model_attempts": 60,
+ "safe_checkpoints": 245,
+ "costs": 112,
+ "output": null
+}
