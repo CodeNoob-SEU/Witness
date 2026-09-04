@@ -1,0 +1,48 @@
+diff --git a/src/_pytest/skipping.py b/src/_pytest/skipping.py
+index 335e10996..f065d4427 100755
+--- a/src/_pytest/skipping.py
++++ b/src/_pytest/skipping.py
+@@ -226,9 +226,14 @@ def evaluate_xfail_marks(item: Item) -> Optional[Xfail]:
+ skipped_by_mark_key = StoreKey[bool]()
+ # Saves the xfail mark evaluation. Can be refreshed during call if None.
+ xfailed_key = StoreKey[Optional[Xfail]]()
++xfail_marker_count_key = StoreKey[int]()
+ unexpectedsuccess_key = StoreKey[str]()
+ 
+ 
++def xfail_mark_count(item: Item) -> int:
++    return sum(1 for _ in item.iter_markers(name="xfail"))
++
++
+ @hookimpl(tryfirst=True)
+ def pytest_runtest_setup(item: Item) -> None:
+     item._store[skipped_by_mark_key] = False
+@@ -239,6 +244,7 @@ def pytest_runtest_setup(item: Item) -> None:
+         skip(skipped.reason)
+ 
+     if not item.config.option.runxfail:
++        item._store[xfail_marker_count_key] = xfail_mark_count(item)
+         item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+         if xfailed and not xfailed.run:
+             xfail("[NOTRUN] " + xfailed.reason)
+@@ -248,6 +254,7 @@ def pytest_runtest_setup(item: Item) -> None:
+ def pytest_runtest_call(item: Item) -> Generator[None, None, None]:
+     xfailed = item._store.get(xfailed_key, None)
+     if xfailed is None:
++        item._store[xfail_marker_count_key] = xfail_mark_count(item)
+         item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+ 
+     if not item.config.option.runxfail:
+@@ -256,6 +263,12 @@ def pytest_runtest_call(item: Item) -> Generator[None, None, None]:
+ 
+     yield
+ 
++    if not item.config.option.runxfail and item._store.get(xfailed_key, None) is None:
++        xfail_marker_count = xfail_mark_count(item)
++        if item._store.get(xfail_marker_count_key, 0) != xfail_marker_count:
++            item._store[xfail_marker_count_key] = xfail_marker_count
++            item._store[xfailed_key] = evaluate_xfail_marks(item)
++
+ 
+ @hookimpl(hookwrapper=True)
+ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):

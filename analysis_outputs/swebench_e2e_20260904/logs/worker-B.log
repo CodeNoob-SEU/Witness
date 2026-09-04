@@ -1,0 +1,5 @@
+[12:31:27] agent_revision=c3fd4f752bd5eb6eed0bfed1a8cda77dcb7e4155a1305f99ad7cbdf282d0a5cf manifest=44b82eddeb0f759acf64b561e31eaf6519aabd7b1dbd4baeda7a69181c2357ac
+[12:31:27] before resume: state=waiting_tool seq=221 pending=['s24:t0']
+[12:31:27] resume attempt 1: RuntimeConflict: the run already has a live writer lease
+[12:31:33] resumed run=13016e96fa5e45b0ba53600beb3841d5 created=True execution=14f06458797c4f27b303263867ede3a9 after 2 attempt(s)
+[12:32:29] state=waiting_model status=None seq=259 models=28 tools=27

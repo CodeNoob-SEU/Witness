@@ -1,0 +1,15 @@
+{
+ "instance_id": "pytest-dev__pytest-7490",
+ "note": "eval copy seeded with gitignored src/_pytest/_version.py from the primary repo",
+ "FAIL_TO_PASS": {
+  "passed": 2,
+  "total": 2,
+  "failing": []
+ },
+ "PASS_TO_PASS": {
+  "passed": 78,
+  "total": 78,
+  "failing": []
+ },
+ "resolved": true
+}

@@ -1,0 +1,41 @@
+[12:33:00] agent_revision=c3fd4f752bd5eb6eed0bfed1a8cda77dcb7e4155a1305f99ad7cbdf282d0a5cf manifest=44b82eddeb0f759acf64b561e31eaf6519aabd7b1dbd4baeda7a69181c2357ac
+[12:33:00] before resume: state=waiting_model seq=259 pending=['model:s28:a1']
+[12:33:00] resume attempt 1: RuntimeConflict: the run already has a live writer lease
+[12:33:05] resume attempt 2: RuntimeConflict: the run already has a live writer lease
+[12:33:11] resume attempt 3: RuntimeConflict: the run already has a live writer lease
+[12:33:16] resume attempt 4: RuntimeConflict: the run already has a live writer lease
+[12:33:21] resumed run=13016e96fa5e45b0ba53600beb3841d5 created=True execution=509c1d02fd674da8896bdab94ffb5331 after 5 attempt(s)
+[12:34:17] state=waiting_model status=None seq=275 models=30 tools=28
+[12:35:14] state=waiting_model status=None seq=335 models=36 tools=34
+[12:36:10] state=waiting_model status=None seq=395 models=42 tools=40
+[12:36:20] state=terminal status=completed seq=400 models=42 tools=40
+{
+ "run_id": "13016e96fa5e45b0ba53600beb3841d5",
+ "session_id": "pytest-7490-r3",
+ "execution_id": "509c1d02fd674da8896bdab94ffb5331",
+ "state": "terminal",
+ "status": "completed",
+ "stop_reason": "completed",
+ "last_sequence": 400,
+ "last_hash": "c6b8890ec58c4b20bf8822c12b6223e6d1de533f314c5500eb0427fde78791c1",
+ "last_step": 42,
+ "counts": {
+  "model_calls": 42,
+  "tool_calls": 40,
+  "tool_executions": 40
+ },
+ "usage": {
+  "input_tokens": 1072292,
+  "output_tokens": 13650,
+  "total_tokens": 1085942,
+  "cached_input_tokens": 745472,
+  "reasoning_output_tokens": 11286,
+  "billable_tokens": 1085942
+ },
+ "pending": {},
+ "executions": 3,
+ "model_attempts": 42,
+ "safe_checkpoints": 169,
+ "costs": 42,
+ "output": "Implemented a fix in `src/_pytest/skipping.py`.\n\nRoot cause: pytest 6 cached the evaluated `xfail` state before the test call, so an `xfail` marker added dynamically inside the test body via `request.node.add_marker(...)` was not seen when creating the test report.\n\nChange made: pytest now tracks the number of `xfail` markers and refreshes the cached `xfail` evaluation after the test call if new `xfail` markers were added during execution.\n\nVerification:\n- Ran relevant skipping/xfail tests.\n- `testing/test_skipping.py` passes: `79 passed`."
+}
