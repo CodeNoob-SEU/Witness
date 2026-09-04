@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
-from openai import AsyncOpenAI, Omit, OpenAIError, omit
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    Omit,
+    OpenAIError,
+    omit,
+)
 from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionStreamOptionsParam,
@@ -170,9 +178,14 @@ def _parse_responses_response(response: Any) -> ModelResponse:
     response_status = getattr(response, "status", None)
     response_error = getattr(response, "error", None)
     if response_error is not None or response_status in {"failed", "cancelled"}:
-        error_code = getattr(response_error, "code", None)
+        error_code = _structural_field(getattr(response_error, "code", None))
         suffix = f" (code={error_code})" if error_code else ""
-        raise ModelInvocationError(f"Responses request did not complete{suffix}.")
+        raise ModelInvocationError(
+            f"Responses request did not complete{suffix}.",
+            request_id=getattr(response, "_request_id", None),
+            error_code=error_code,
+            retryable=error_code in _RETRYABLE_RESPONSE_ERROR_CODES,
+        )
 
     raw_items = tuple(_wire_output_item(item) for item in response.output)
     calls: list[ToolCall] = []
@@ -259,14 +272,50 @@ def _parse_chat_response(response: Any) -> ModelResponse:
     )
 
 
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 429})
+_RETRYABLE_RESPONSE_ERROR_CODES = frozenset({"server_error", "rate_limit_exceeded"})
+_STRUCTURAL_FIELD_MAX_CHARS = 120
+
+
+def _structural_field(value: object) -> str | None:
+    """Keep provider ``code``/``param`` identifiers; drop anything message-like."""
+
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > _STRUCTURAL_FIELD_MAX_CHARS or any(ch.isspace() for ch in text):
+        return None
+    return text
+
+
 def _sanitized_invocation_error(exc: Exception) -> ModelInvocationError:
-    if isinstance(exc, OpenAIError):
-        request_id = getattr(exc, "request_id", None)
-        status = getattr(exc, "status_code", None)
-        suffix = f" (status={status})" if status is not None else ""
+    if isinstance(exc, APIConnectionError):
+        kind = "timeout" if isinstance(exc, APITimeoutError) else "connection"
         return ModelInvocationError(
-            f"Model request failed{suffix}: {type(exc).__name__}",
-            request_id=request_id,
+            f"Model request failed ({kind}): {type(exc).__name__}",
+            retryable=True,
+        )
+    if isinstance(exc, APIStatusError):
+        status = exc.status_code
+        error_code = _structural_field(getattr(exc, "code", None))
+        error_param = _structural_field(getattr(exc, "param", None))
+        details = [f"status={status}"]
+        if error_code:
+            details.append(f"code={error_code}")
+        if error_param:
+            details.append(f"param={error_param}")
+        return ModelInvocationError(
+            f"Model request failed ({', '.join(details)}): {type(exc).__name__}",
+            request_id=getattr(exc, "request_id", None),
+            status_code=status,
+            error_code=error_code,
+            error_param=error_param,
+            retryable=status in _RETRYABLE_HTTP_STATUSES or status >= 500,
+        )
+    if isinstance(exc, OpenAIError):
+        return ModelInvocationError(
+            f"Model request failed: {type(exc).__name__}",
+            request_id=getattr(exc, "request_id", None),
         )
     if isinstance(exc, (AttributeError, KeyError, TypeError, ValueError)):
         return ModelInvocationError(f"Provider returned an invalid response: {type(exc).__name__}.")

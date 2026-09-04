@@ -588,6 +588,34 @@ def _usage_from_public(data: Mapping[str, Any]) -> Usage:
     )
 
 
+_PROGRESS_EVENT_KINDS: frozenset[RunEventKind] = frozenset(
+    {
+        RunEventKind.CONTEXT_GOVERNED,
+        RunEventKind.MODEL_STARTED,
+        RunEventKind.MODEL_COMPLETED,
+        RunEventKind.MODEL_FAILED,
+        RunEventKind.MODEL_ABANDONED,
+        RunEventKind.TOOL_PLANNED,
+        RunEventKind.TOOL_STARTED,
+        RunEventKind.TOOL_CLAIMED,
+        RunEventKind.TOOL_COMPLETED,
+        RunEventKind.TOOL_REUSED,
+        RunEventKind.BUDGET_EXHAUSTED,
+        RunEventKind.LOOP_DETECTED,
+        RunEventKind.RECONCILIATION_REQUIRED,
+    }
+)
+
+
+def _last_progress_event(events: Sequence[StoredRunEvent]) -> StoredRunEvent | None:
+    """The last orchestration-progress fact; lifecycle and bookkeeping are skipped."""
+
+    return next(
+        (event for event in reversed(events) if event.kind in _PROGRESS_EVENT_KINDS),
+        None,
+    )
+
+
 _AGENT_KIND_MAP: Mapping[AgentJournalEventKind, RunEventKind] = MappingProxyType(
     {
         AgentJournalEventKind.RUN_STARTED: RunEventKind.RUN_STARTED,
@@ -1966,7 +1994,8 @@ class AgentRuntime:
                     "run owns a durable workspace; configure its workspace adapter to Resume"
                 )
             await self._claim_session_run(snapshot.session_id, run_id)
-            first = (await self.journal.read(run_id, after_sequence=0))[0]
+            durable_history = await self.journal.read(run_id, after_sequence=0)
+            first = durable_history[0]
             raw_version = first.data.get("session_version", 0)
             session_version = int(raw_version) if isinstance(raw_version, int) else 0
             execution_id = uuid.uuid4().hex
@@ -1980,7 +2009,7 @@ class AgentRuntime:
             )
             async with _WriterLeaseHandoff(writer) as handoff:
                 resume_data: dict[str, Any] = {
-                    "resume_reason": self._resume_reason(snapshot),
+                    "resume_reason": self._resume_reason(snapshot, durable_history),
                 }
                 if snapshot.execution_id is not None:
                     resume_data["previous_execution_id"] = snapshot.execution_id
@@ -1996,10 +2025,16 @@ class AgentRuntime:
                 handoff.transfer()
             return RunHandle(run_id, snapshot.session_id, execution_id, True)
 
-    @staticmethod
-    def _resume_reason(snapshot: RunSnapshot) -> str:
+    @classmethod
+    def _resume_reason(
+        cls,
+        snapshot: RunSnapshot,
+        durable_history: Sequence[StoredRunEvent],
+    ) -> str:
         if any(action.kind.value == "model" for action in snapshot.pending.values()):
             return "model_abandoned"
+        if cls._transient_model_failure_step(durable_history) is not None:
+            return "model_retry"
         started_tools = tuple(
             tool for tool in snapshot.tools.values() if tool.phase == "started"
         )
@@ -3325,7 +3360,7 @@ class AgentRuntime:
             await self._finalize(writer, recovered_terminal)
             return
 
-        resume_state = await self._build_resume_state(writer)
+        resume_state = await self._build_resume_state(writer, durable_history)
         if resume_state is None:
             raise ResumeRejected(
                 "durable facts do not identify a terminal result or safe continuation"
@@ -3350,6 +3385,19 @@ class AgentRuntime:
         await self._finalize(writer, result)
 
     @staticmethod
+    def _transient_model_failure_step(events: Sequence[StoredRunEvent]) -> int | None:
+        """Step to retry when the last progress fact is a non-terminal model failure."""
+
+        cause = _last_progress_event(events)
+        if (
+            cause is None
+            or cause.kind is not RunEventKind.MODEL_FAILED
+            or cause.data.get("terminal_decision") is not False
+        ):
+            return None
+        return cause.step
+
+    @staticmethod
     def _recover_pre_result_terminal(
         snapshot: RunSnapshot,
         events: Sequence[StoredRunEvent],
@@ -3364,25 +3412,7 @@ class AgentRuntime:
         success.
         """
 
-        progress_kinds = {
-            RunEventKind.CONTEXT_GOVERNED,
-            RunEventKind.MODEL_STARTED,
-            RunEventKind.MODEL_COMPLETED,
-            RunEventKind.MODEL_FAILED,
-            RunEventKind.MODEL_ABANDONED,
-            RunEventKind.TOOL_PLANNED,
-            RunEventKind.TOOL_STARTED,
-            RunEventKind.TOOL_CLAIMED,
-            RunEventKind.TOOL_COMPLETED,
-            RunEventKind.TOOL_REUSED,
-            RunEventKind.BUDGET_EXHAUSTED,
-            RunEventKind.LOOP_DETECTED,
-            RunEventKind.RECONCILIATION_REQUIRED,
-        }
-        cause = next(
-            (event for event in reversed(events) if event.kind in progress_kinds),
-            None,
-        )
+        cause = _last_progress_event(events)
         if cause is None:
             # A Fork starts a new log at a reducer-approved safe checkpoint.
             # When that checkpoint already contains a non-empty final answer,
@@ -3413,6 +3443,10 @@ class AgentRuntime:
                 events=(),
             )
         if cause.kind is RunEventKind.RECONCILIATION_REQUIRED:
+            return None
+        if cause.data.get("terminal_decision") is False:
+            # An explicit non-decision (a retried or retry-exhausted transient
+            # model failure). The run continues from durable facts.
             return None
 
         checkpoint = cause.checkpoint or MappingProxyType({})
@@ -3535,9 +3569,14 @@ class AgentRuntime:
             error=resolved_error,
         )
 
-    async def _build_resume_state(self, writer: _JournalWriter) -> AgentResumeState | None:
+    async def _build_resume_state(
+        self,
+        writer: _JournalWriter,
+        durable_history: Sequence[StoredRunEvent],
+    ) -> AgentResumeState | None:
         snapshot = await self.load(writer.run_id)
         transcript = transcript_from_json(snapshot.transcript)
+        retry_step = self._transient_model_failure_step(durable_history)
         completed: list[RecoveredToolCall] = []
         for tool in snapshot.tools.values():
             if tool.call is None or tool.message is None:
@@ -3604,9 +3643,11 @@ class AgentRuntime:
             isinstance(item, ToolMessage) for item in transcript[last_assistant_index + 1 :]
         )
         if has_tool_messages:
+            # A transient model failure at step N is retried at step N; only a
+            # completed model turn advances the step budget.
             return AgentResumeState(
                 transcript,
-                max(1, snapshot.last_step + 1),
+                retry_step if retry_step is not None else max(1, snapshot.last_step + 1),
                 snapshot.counts.model_calls,
                 snapshot.counts.tool_calls,
                 snapshot.counts.tool_executions,
@@ -3682,6 +3723,15 @@ class AgentRuntime:
         )
 
     async def _finalize(self, writer: _JournalWriter, result: AgentResult) -> None:
+        if result.stop_reason is StopReason.MODEL_UNAVAILABLE:
+            # The Agent ran out of in-execution retries for a transient
+            # provider failure. Its last durable fact is a non-terminal
+            # model.failed; no run.completed is written so the run stays
+            # resumable and the next ResumeRun retries the same step.
+            self._results[writer.run_id] = result
+            self._forget_finished_runs()
+            await writer.release()
+            return
         self._results[writer.run_id] = result
         self._forget_finished_runs()
         if result.status is RunStatus.COMPLETED:
@@ -4040,6 +4090,11 @@ class AgentRuntime:
             "previous_execution_id",
             "resume_reason",
             "attempt",
+            "execution_attempt",
+            "retryable",
+            "retry_exhausted",
+            "status_code",
+            "error_code",
         }
         for key in scalar_keys:
             value = data.get(key)

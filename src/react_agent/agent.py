@@ -109,6 +109,9 @@ class AgentConfig:
     context_summary_max_chars: int = 12_000
     parallel_tool_calls: bool = True
     repeated_action_limit: int = 3
+    model_retry_limit: int = 3
+    model_retry_backoff_s: float = 2.0
+    model_retry_max_backoff_s: float = 30.0
 
     def __post_init__(self) -> None:
         if self.max_steps < 1:
@@ -131,6 +134,20 @@ class AgentConfig:
             raise ConfigurationError("context_summary_max_chars must be at least 64")
         if self.repeated_action_limit < 2:
             raise ConfigurationError("repeated_action_limit must be at least 2")
+        if self.model_retry_limit < 0:
+            raise ConfigurationError("model_retry_limit must be non-negative")
+        if self.model_retry_backoff_s <= 0:
+            raise ConfigurationError("model_retry_backoff_s must be positive")
+        if self.model_retry_max_backoff_s < self.model_retry_backoff_s:
+            raise ConfigurationError(
+                "model_retry_max_backoff_s must be at least model_retry_backoff_s"
+            )
+
+    def model_retry_backoff(self, failed_attempts: int) -> float:
+        """Exponential backoff before the attempt after ``failed_attempts`` failures."""
+
+        scaled: float = self.model_retry_backoff_s * float(2 ** max(0, failed_attempts - 1))
+        return min(scaled, self.model_retry_max_backoff_s)
 
 
 class ReActAgent:
@@ -556,6 +573,33 @@ class ReActAgent:
                 stream_data={
                     "status": final.status.value,
                     "stop_reason": final.stop_reason.value,
+                    "model_calls": final.model_calls,
+                    "tool_calls": final.tool_calls,
+                    "tool_executions": final.tool_executions,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                    "usage": _usage_data(final.usage),
+                    "context": dict(final.context_metrics),
+                },
+            )
+            return replace(final, events=tuple(events))
+
+        async def suspend(final: AgentResult, *, step: int) -> AgentResult:
+            """End this execution without deciding the run.
+
+            The durable log deliberately gets no ``run.completed`` fact: the
+            last committed ``model.failed`` carries ``terminal_decision=false``,
+            so a Runtime may Resume the same step with a fresh attempt. The
+            in-memory event stream still closes, because this execution is over.
+            """
+
+            await emit(
+                EventKind.RUN_COMPLETED,
+                step=step,
+                data={"status": final.status.value},
+                stream_data={
+                    "status": final.status.value,
+                    "stop_reason": final.stop_reason.value,
+                    "resumable": True,
                     "model_calls": final.model_calls,
                     "tool_calls": final.tool_calls,
                     "tool_executions": final.tool_executions,
@@ -1086,140 +1130,217 @@ class ReActAgent:
                 )
                 final = result(RunStatus.PARTIAL, StopReason.CONTEXT_LIMIT)
                 return await finish(final, step=step)
-            model_started_at = time.monotonic()
-            await record(
-                AgentJournalEventKind.MODEL_STARTED,
-                f"model:s{step}:started:{current_execution_id}",
-                step=step,
-                public_data={
-                    "model_call": model_calls + 1,
-                    "context_chars": context_chars,
-                },
-                private_data={"transcript": transcript_to_json(transcript)},
-            )
-            await emit(
-                EventKind.MODEL_STARTED,
-                step=step,
-                stream_data={
-                    "model_call": model_calls + 1,
-                    "context_chars": context_chars,
-                    "max_context_chars": self.config.max_context_chars,
-                    "remaining_wall_time_ms": round(
-                        max(0.0, deadline - time.monotonic()) * 1000, 3
-                    ),
-                },
-            )
-            model_calls += 1
-            forward_model_event = model_stream_forwarder(step)
-
             request = ModelRequest(
                 transcript=projection.transcript,
                 tools=tool_specs,
                 instructions=self.instructions,
                 parallel_tool_calls=self.config.parallel_tool_calls,
             )
-            try:
-                await guard_side_effect()
-                if stream_sink is not None and isinstance(self.model, StreamingModel):
-                    model_call = self.model.complete_stream(request, forward_model_event)
-                else:
-                    model_call = self.model.complete(request)
-                response = await within_deadline(model_call)
-            except TimeoutError:
+            model_attempt = 0
+            while True:
+                model_attempt += 1
+                model_started_at = time.monotonic()
+                # Attempt 1 keeps the historical operation ids; retries get
+                # their own so the journal's idempotent append does not
+                # collapse them into the first attempt.
+                attempt_prefix = (
+                    f"model:s{step}" if model_attempt == 1 else f"model:s{step}:a{model_attempt}"
+                )
+                started_operation_id = f"{attempt_prefix}:started:{current_execution_id}"
+                failed_operation_id = f"{attempt_prefix}:failed:{current_execution_id}"
                 await record(
-                    AgentJournalEventKind.MODEL_FAILED,
-                    f"model:s{step}:failed:{current_execution_id}",
+                    AgentJournalEventKind.MODEL_STARTED,
+                    started_operation_id,
                     step=step,
                     public_data={
-                        "error_type": "timeout",
-                        "request_id": None,
-                        "status": RunStatus.TIMED_OUT.value,
-                        "stop_reason": StopReason.WALL_TIME.value,
-                        "terminal_decision": True,
+                        "model_call": model_calls + 1,
+                        "context_chars": context_chars,
                     },
                     private_data={"transcript": transcript_to_json(transcript)},
                 )
-                await record(
-                    AgentJournalEventKind.BUDGET_EXHAUSTED,
-                    f"budget:s{step}:wall_time",
+                await emit(
+                    EventKind.MODEL_STARTED,
                     step=step,
-                    public_data={
-                        "reason": "wall_time",
-                        "status": RunStatus.TIMED_OUT.value,
-                        "stop_reason": StopReason.WALL_TIME.value,
-                        "terminal_decision": True,
+                    stream_data={
+                        "model_call": model_calls + 1,
+                        "context_chars": context_chars,
+                        "max_context_chars": self.config.max_context_chars,
+                        "execution_attempt": model_attempt,
+                        "remaining_wall_time_ms": round(
+                            max(0.0, deadline - time.monotonic()) * 1000, 3
+                        ),
                     },
-                    private_data={"transcript": transcript_to_json(transcript)},
                 )
-                await emit(EventKind.BUDGET_EXHAUSTED, step=step, data={"reason": "wall_time"})
-                final = result(RunStatus.TIMED_OUT, StopReason.WALL_TIME)
-                return await finish(final, step=step)
-            except ModelInvocationError as exc:
-                await record(
-                    AgentJournalEventKind.MODEL_FAILED,
-                    f"model:s{step}:failed:{current_execution_id}",
-                    step=step,
-                    public_data={
+                model_calls += 1
+                forward_model_event = model_stream_forwarder(step)
+                try:
+                    await guard_side_effect()
+                    if stream_sink is not None and isinstance(self.model, StreamingModel):
+                        model_call = self.model.complete_stream(request, forward_model_event)
+                    else:
+                        model_call = self.model.complete(request)
+                    response = await within_deadline(model_call)
+                except TimeoutError:
+                    await record(
+                        AgentJournalEventKind.MODEL_FAILED,
+                        failed_operation_id,
+                        step=step,
+                        public_data={
+                            "error_type": "timeout",
+                            "request_id": None,
+                            "status": RunStatus.TIMED_OUT.value,
+                            "stop_reason": StopReason.WALL_TIME.value,
+                            "terminal_decision": True,
+                        },
+                        private_data={"transcript": transcript_to_json(transcript)},
+                    )
+                    await record(
+                        AgentJournalEventKind.BUDGET_EXHAUSTED,
+                        f"budget:s{step}:wall_time",
+                        step=step,
+                        public_data={
+                            "reason": "wall_time",
+                            "status": RunStatus.TIMED_OUT.value,
+                            "stop_reason": StopReason.WALL_TIME.value,
+                            "terminal_decision": True,
+                        },
+                        private_data={"transcript": transcript_to_json(transcript)},
+                    )
+                    await emit(EventKind.BUDGET_EXHAUSTED, step=step, data={"reason": "wall_time"})
+                    final = result(RunStatus.TIMED_OUT, StopReason.WALL_TIME)
+                    return await finish(final, step=step)
+                except ModelInvocationError as exc:
+                    # A transient provider failure is retried inside this
+                    # execution with bounded backoff. Each retry is a new
+                    # attempt of the same step, so no step budget is burned.
+                    retry_in_s: float | None = None
+                    if exc.retryable and model_attempt <= self.config.model_retry_limit:
+                        backoff = self.config.model_retry_backoff(model_attempt)
+                        if backoff < deadline - time.monotonic():
+                            retry_in_s = backoff
+                    duration_ms = round((time.monotonic() - model_started_at) * 1000, 3)
+                    failure_public: dict[str, JsonValue] = {
                         "error_type": type(exc).__name__,
                         "request_id": exc.request_id,
-                        "status": RunStatus.FAILED.value,
-                        "stop_reason": StopReason.MODEL_ERROR.value,
-                        "terminal_decision": True,
-                    },
-                    private_data={
+                        "status_code": exc.status_code,
+                        "error_code": exc.error_code,
+                        "retryable": exc.retryable,
+                        "execution_attempt": model_attempt,
+                    }
+                    failure_private: dict[str, JsonValue] = {
                         "error": str(exc),
+                        "error_param": exc.error_param,
                         "transcript": transcript_to_json(transcript),
-                    },
-                )
-                await emit(
-                    EventKind.MODEL_FAILED,
-                    step=step,
-                    data={
-                        "error_type": type(exc).__name__,
-                        "request_id": exc.request_id,
-                        "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
-                    },
-                )
-                final = result(
-                    RunStatus.FAILED,
-                    StopReason.MODEL_ERROR,
-                    error=str(exc),
-                )
-                return await finish(final, step=step)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                await record(
-                    AgentJournalEventKind.MODEL_FAILED,
-                    f"model:s{step}:failed:{current_execution_id}",
-                    step=step,
-                    public_data={
-                        "error_type": type(exc).__name__,
-                        "request_id": None,
-                        "status": RunStatus.FAILED.value,
-                        "stop_reason": StopReason.MODEL_ERROR.value,
-                        "terminal_decision": True,
-                    },
-                    private_data={
-                        "error": f"Model adapter failed: {type(exc).__name__}",
-                        "transcript": transcript_to_json(transcript),
-                    },
-                )
-                await emit(
-                    EventKind.MODEL_FAILED,
-                    step=step,
-                    data={
-                        "error_type": type(exc).__name__,
-                        "request_id": None,
-                        "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
-                    },
-                )
-                final = result(
-                    RunStatus.FAILED,
-                    StopReason.MODEL_ERROR,
-                    error=f"Model adapter failed: {type(exc).__name__}",
-                )
-                return await finish(final, step=step)
+                    }
+                    if retry_in_s is not None:
+                        failure_public.update(
+                            {
+                                "terminal_decision": False,
+                                "retry_in_ms": round(retry_in_s * 1000, 3),
+                            }
+                        )
+                    elif exc.retryable:
+                        failure_public.update(
+                            {
+                                "terminal_decision": False,
+                                "retry_exhausted": True,
+                            }
+                        )
+                    else:
+                        failure_public.update(
+                            {
+                                "status": RunStatus.FAILED.value,
+                                "stop_reason": StopReason.MODEL_ERROR.value,
+                                "terminal_decision": True,
+                            }
+                        )
+                    await record(
+                        AgentJournalEventKind.MODEL_FAILED,
+                        failed_operation_id,
+                        step=step,
+                        public_data=failure_public,
+                        private_data=failure_private,
+                    )
+                    await emit(
+                        EventKind.MODEL_FAILED,
+                        step=step,
+                        data={
+                            "error_type": type(exc).__name__,
+                            "request_id": exc.request_id,
+                            "status_code": exc.status_code,
+                            "error_code": exc.error_code,
+                            "retryable": exc.retryable,
+                            "execution_attempt": model_attempt,
+                            "retry_in_ms": (
+                                round(retry_in_s * 1000, 3) if retry_in_s is not None else None
+                            ),
+                            "duration_ms": duration_ms,
+                        },
+                    )
+                    if retry_in_s is not None:
+                        try:
+                            await within_deadline(asyncio.sleep(retry_in_s))
+                        except TimeoutError:
+                            retry_in_s = None
+                        else:
+                            continue
+                    if exc.retryable:
+                        # Retries ran out or the wall clock left no room for
+                        # backoff. Nothing was decided: leave the run resumable.
+                        final = result(
+                            RunStatus.FAILED,
+                            StopReason.MODEL_UNAVAILABLE,
+                            error=(
+                                f"{exc} (transient; {model_attempt} attempt(s) in this "
+                                "execution, resumable)"
+                            ),
+                        )
+                        return await suspend(final, step=step)
+                    final = result(
+                        RunStatus.FAILED,
+                        StopReason.MODEL_ERROR,
+                        error=str(exc),
+                    )
+                    return await finish(final, step=step)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await record(
+                        AgentJournalEventKind.MODEL_FAILED,
+                        failed_operation_id,
+                        step=step,
+                        public_data={
+                            "error_type": type(exc).__name__,
+                            "request_id": None,
+                            "retryable": False,
+                            "execution_attempt": model_attempt,
+                            "status": RunStatus.FAILED.value,
+                            "stop_reason": StopReason.MODEL_ERROR.value,
+                            "terminal_decision": True,
+                        },
+                        private_data={
+                            "error": f"Model adapter failed: {type(exc).__name__}",
+                            "transcript": transcript_to_json(transcript),
+                        },
+                    )
+                    await emit(
+                        EventKind.MODEL_FAILED,
+                        step=step,
+                        data={
+                            "error_type": type(exc).__name__,
+                            "request_id": None,
+                            "retryable": False,
+                            "execution_attempt": model_attempt,
+                            "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
+                        },
+                    )
+                    final = result(
+                        RunStatus.FAILED,
+                        StopReason.MODEL_ERROR,
+                        error=f"Model adapter failed: {type(exc).__name__}",
+                    )
+                    return await finish(final, step=step)
+                break
 
             usage = usage + response.usage
             message = response.message

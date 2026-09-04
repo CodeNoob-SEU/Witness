@@ -390,6 +390,10 @@ class StopReason(StrEnum):
     WALL_TIME = "wall_time"
     LOOP_DETECTED = "loop_detected"
     MODEL_ERROR = "model_error"
+    # The provider kept failing with transient errors and this execution's
+    # bounded retry budget ran out. Not a decision: no ``run.completed`` fact
+    # is written, so a durable Runtime may Resume the same step later.
+    MODEL_UNAVAILABLE = "model_unavailable"
     MODEL_INCOMPLETE = "model_incomplete"
     MODEL_REFUSAL = "model_refusal"
     PROTOCOL_ERROR = "protocol_error"

@@ -645,6 +645,8 @@ def _agent_config_from_env(
             context_strategy=context_strategy,
             context_keep_recent_turns=3,
             repeated_action_limit=5,
+            model_retry_limit=5,
+            model_retry_max_backoff_s=60.0,
         )
     return AgentConfig(
         max_steps=8,
@@ -662,6 +664,7 @@ def _public_run_error(status: str, stop_reason: str) -> str | None:
         return None
     return {
         "wall_time": "Agent request timed out. Please try again.",
+        "model_unavailable": "The model provider is temporarily unavailable. Please try again.",
         "model_refusal": "The model declined this request.",
         "model_incomplete": "The model returned an incomplete response.",
         "max_steps": "The Agent reached its step limit.",

@@ -546,6 +546,9 @@ config = AgentConfig(
     context_summary_max_chars=12_000,
     parallel_tool_calls=True,
     repeated_action_limit=3,
+    model_retry_limit=3,
+    model_retry_backoff_s=2.0,
+    model_retry_max_backoff_s=30.0,
 )
 ```
 
@@ -562,11 +565,24 @@ config = AgentConfig(
   随机值也能识别；同时也能识别
   `A/B/A/B` 交替循环。确实需要稳定轮询的工具可显式设置 `allow_repeated=True`。
 
+- `model_retry_limit` / `model_retry_backoff_s` / `model_retry_max_backoff_s`：**瞬时模型错误**
+  （连接失败、超时、408/409/429、5xx，以及 Responses 的 `server_error` / `rate_limit_exceeded`）在
+  同一次执行内以指数退避重试，退避不会超过剩余 wall time。每次重试是同一 step 的新 attempt，
+  不消耗 step 预算；journal 里记为 `model_failed(terminal_decision=false, retry_in_ms=…)` 再接一条新的
+  `model_started`。语义性 4xx（400/401/404/422 等）和无法解析的响应不重试，直接以 `MODEL_ERROR` 终止。
+
 工具默认 `idempotent=False`、`parallel_safe=False`，需要作者在确认语义后显式放开；框架只在
 `idempotent=True` 时把工具超时标记为可重试，但不会擅自重试有副作用的工具。
 
 预算耗尽、循环检测和总超时是正常终态，不会伪装成成功回答。检查 `result.status` 与 `result.stop_reason`，不要只判断 `result.output`。
 供应商的 `length`、`incomplete`、`content_filter` 和 refusal 也会映射为明确终态。
+
+有一个刻意**不是终态**的停止：重试预算耗尽后仍是瞬时错误时，`run()` 返回
+`status=FAILED, stop_reason=MODEL_UNAVAILABLE`，但 journal 不写 `run.completed`——最后一条事实是
+`model_failed(terminal_decision=false, retry_exhausted=true)`。它表示"这次执行放弃了，run 没有被判决"：
+durable Runtime 会释放 lease，之后的 `ResumeRun`（`resume_reason=model_retry`）从**同一 step** 发起新
+attempt，而不是像终态那样只能 Fork。`ModelInvocationError` 上的 `status_code` / `error_code` /
+`error_param` / `retryable` 会进入 `model_failed` 的公开数据（`error_param` 与错误文本只进 private payload）。
 
 ## 分层上下文治理
 
@@ -994,6 +1010,8 @@ Runtime SSE 明确区分两类事件：
 | 中断状态 | Resume 行为 |
 | --- | --- |
 | 模型调用已开始但未提交完成 | 写入 `model_abandoned`，将该次成本记为未知，再发起新的模型 attempt。 |
+| 最后一条事实是 `model_failed(terminal_decision=false)`（瞬时错误重试耗尽） | 不是终态。`resume_reason=model_retry`，从同一 step 发起新 attempt，不消耗 step 预算。 |
+| 旧 worker 被 kill，lease 尚未过期 | `RuntimeConflict("the run already has a live writer lease")`；调用方需等待 `lease_ttl_s`（默认 30 s）后再 Resume。 |
 | 压缩已开始但无 terminal fact | 写入 compression `abandoned`；若内容寻址 summary 已落盘则复用，否则再压缩。 |
 | 工具已计划但尚未执行 | 从 durable tool plan 继续。 |
 | 幂等工具执行中断 | 使用稳定 idempotency key 自动重试。 |

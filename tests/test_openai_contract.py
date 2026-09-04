@@ -960,3 +960,160 @@ def test_remote_plain_http_base_url_is_rejected_by_default() -> None:
             api_key="test-key",
             base_url="http://provider.example/v1",
         )
+
+
+def _error_body(code: str | None, param: str | None, message: str) -> dict:
+    return {
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": code,
+            "param": param,
+        }
+    }
+
+
+async def _invoke_with_status(status: int, body: dict) -> ModelInvocationError:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"x-request-id": f"req-{status}"}, json=body)
+
+    client = await sdk_client(handler)
+    try:
+        with pytest.raises(ModelInvocationError) as exc_info:
+            await OpenAIModel("test-model", api_mode="chat_completions", client=client).complete(
+                ModelRequest((UserMessage("请求"),), (), "Answer.")
+            )
+    finally:
+        await client.close()
+    return exc_info.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "code", "retryable"),
+    [
+        (429, "rate_limit_exceeded", True),
+        (503, "server_error", True),
+        (500, None, True),
+        (408, None, True),
+        (400, "unknown_parameter", False),
+        (401, "invalid_api_key", False),
+        (404, None, False),
+        (422, None, False),
+    ],
+)
+async def test_provider_status_errors_are_classified_for_retry(
+    status: int, code: str | None, retryable: bool
+) -> None:
+    error = await _invoke_with_status(
+        status, _error_body(code, None, "secret provider prose that echoes user content")
+    )
+
+    assert error.retryable is retryable
+    assert error.status_code == status
+    assert error.error_code == code
+    assert error.request_id == f"req-{status}"
+    assert "secret provider prose" not in str(error)
+    assert f"status={status}" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_provider_4xx_keeps_structural_code_and_param_but_not_message() -> None:
+    error = await _invoke_with_status(
+        400,
+        _error_body(
+            "unknown_parameter",
+            "input[2].parsed_arguments",
+            "Unknown parameter: 'input[2].parsed_arguments'.",
+        ),
+    )
+
+    assert error.retryable is False
+    assert error.error_code == "unknown_parameter"
+    assert error.error_param == "input[2].parsed_arguments"
+    assert str(error) == (
+        "Model request failed (status=400, code=unknown_parameter, "
+        "param=input[2].parsed_arguments): BadRequestError"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_connection_failures_are_retryable() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = await sdk_client(handler)
+    try:
+        with pytest.raises(ModelInvocationError) as exc_info:
+            await OpenAIModel("test-model", api_mode="chat_completions", client=client).complete(
+                ModelRequest((UserMessage("请求"),), (), "Answer.")
+            )
+    finally:
+        await client.close()
+
+    error = exc_info.value
+    assert error.retryable is True
+    assert error.status_code is None
+    assert str(error) == "Model request failed (connection): APIConnectionError"
+
+
+@pytest.mark.asyncio
+async def test_provider_timeouts_are_retryable() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    client = await sdk_client(handler)
+    try:
+        with pytest.raises(ModelInvocationError) as exc_info:
+            await OpenAIModel("test-model", api_mode="chat_completions", client=client).complete(
+                ModelRequest((UserMessage("请求"),), (), "Answer.")
+            )
+    finally:
+        await client.close()
+
+    assert exc_info.value.retryable is True
+    assert str(exc_info.value) == "Model request failed (timeout): APITimeoutError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "retryable"),
+    [("server_error", True), ("rate_limit_exceeded", True), ("invalid_prompt", False)],
+)
+async def test_responses_failed_status_is_classified_by_error_code(
+    code: str, retryable: bool
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "resp-failed",
+                "object": "response",
+                "created_at": 1,
+                "model": "test-model",
+                "status": "failed",
+                "error": {"code": code, "message": "provider prose"},
+                "output": [],
+            },
+        )
+
+    client = await sdk_client(handler)
+    try:
+        with pytest.raises(ModelInvocationError) as exc_info:
+            await OpenAIModel("test-model", api_mode="responses", client=client).complete(
+                ModelRequest((UserMessage("请求"),), (), "Answer.")
+            )
+    finally:
+        await client.close()
+
+    assert exc_info.value.retryable is retryable
+    assert exc_info.value.error_code == code
+    assert "provider prose" not in str(exc_info.value)
+
+
+def test_invalid_provider_responses_are_never_retryable() -> None:
+    from react_agent.provider import _sanitized_invocation_error
+
+    assert _sanitized_invocation_error(KeyError("choices")).retryable is False
+    assert _sanitized_invocation_error(RuntimeError("boom")).retryable is False
