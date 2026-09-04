@@ -199,7 +199,8 @@ def build_compression_model(api_key: str) -> OpenAIModel | None:
 
 
 def build_agent(model: OpenAIModel) -> ReActAgent:
-    SUMMARIES.mkdir(parents=True, exist_ok=True)
+    # FileContextSummaryStore refuses a world-readable root; create it private.
+    SUMMARIES.mkdir(mode=0o700, parents=True, exist_ok=True)
     compression_model = build_compression_model(os.environ["OPENAI_API_KEY"])
     governor = ContextGovernor(
         strategy=ContextStrategy.TIERED,

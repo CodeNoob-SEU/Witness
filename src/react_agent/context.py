@@ -261,6 +261,21 @@ class FileContextSummaryStore:
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
+        # A pre-created world-readable directory would otherwise be discovered
+        # only at the first put, where it degrades silently into a per-step
+        # compression_error and the run never persists a single summary.
+        if self.root.exists():
+            self._require_private_root()
+
+    def _require_private_root(self) -> None:
+        root_metadata = self.root.stat()
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise ValueError("context summary root must be a directory")
+        if root_metadata.st_mode & 0o077:
+            raise ValueError(
+                f"context summary root {self.root} permissions are not private "
+                f"(mode {stat.S_IMODE(root_metadata.st_mode):o}); create it with mode 0700"
+            )
 
     def _path(self, key: str) -> Path:
         if _HEX_DIGEST.fullmatch(key) is None:
@@ -315,11 +330,7 @@ class FileContextSummaryStore:
     def _put_sync(self, record: StoredContextSummary) -> None:
         path = self._path(record.key)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        root_metadata = self.root.stat()
-        if not stat.S_ISDIR(root_metadata.st_mode):
-            raise ValueError("context summary root must be a directory")
-        if root_metadata.st_mode & 0o077:
-            raise ValueError("context summary root permissions are not private")
+        self._require_private_root()
         existing = self._get_sync(record.key)
         if existing is not None:
             if existing != record:

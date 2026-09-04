@@ -1112,3 +1112,17 @@ def test_compression_terminal_is_the_only_new_usage_and_call_accounting_fact() -
     )
     assert projection_draft.model_calls_delta == 0
     assert projection_draft.usage_delta == Usage()
+
+
+def test_file_summary_store_rejects_a_world_readable_root_at_construction(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "shared-context"
+    root.mkdir(mode=0o755)
+
+    with pytest.raises(ValueError, match="not private"):
+        FileContextSummaryStore(root)
+
+    root.chmod(0o700)
+    FileContextSummaryStore(root)  # private roots, and missing roots, are accepted
+    FileContextSummaryStore(tmp_path / "not-yet-created")
