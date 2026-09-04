@@ -13,18 +13,21 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum, StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, ParamSpec, TypeVar, cast, get_type_hints, overload
+from typing import Any, ParamSpec, Protocol, TypeVar, cast, get_type_hints, overload
 
 from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
+from .context import ToolContextPolicy
 from .errors import ConfigurationError
-from .models import ToolCall, ToolMessage, ToolSpec
+from .models import JsonValue, ToolCall, ToolMessage, ToolSpec
 
 P = ParamSpec("P")
 R = TypeVar("R")
 ToolFunction = Callable[..., Any]
+PrivateResultEncoder = Callable[[Any], Mapping[str, JsonValue]]
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_MAX_PRIVATE_RESULT_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,14 @@ class ApprovalRequest:
 
 ApprovalHandler = Callable[[ApprovalRequest], bool | Awaitable[bool]]
 SideEffectGuard = Callable[[], Awaitable[None] | None]
+
+
+class ToolLifecycle(Protocol):
+    """Optional lifecycle seam for tools that own external resources."""
+
+    async def finalize_execution(self, run_id: str, execution_id: str) -> None: ...
+
+    async def close(self) -> None: ...
 
 
 class DebugExposure(StrEnum):
@@ -63,6 +74,7 @@ class ToolExecutionContext:
     """Framework-owned execution metadata, excluded from the model schema."""
 
     run_id: str
+    execution_id: str
     call_id: str
     call_key: str
     operation_id: str
@@ -186,10 +198,13 @@ class Tool:
         "_context_parameter",
         "_fn",
         "_input_model",
+        "_private_result_encoder",
         "allow_repeated",
+        "context_policy",
         "debug_exposure",
         "description",
         "idempotent",
+        "lifecycle",
         "name",
         "parallel_safe",
         "requires_approval",
@@ -209,8 +224,11 @@ class Tool:
         idempotent: bool = False,
         parallel_safe: bool = False,
         allow_repeated: bool = False,
+        context_policy: ToolContextPolicy | None = None,
         debug_exposure: DebugExposure = DebugExposure.METADATA,
         resume_policy: ToolResumePolicy | None = None,
+        lifecycle: ToolLifecycle | None = None,
+        private_result_encoder: PrivateResultEncoder | None = None,
         version: str = "1",
     ) -> None:
         self.name = name or fn.__name__
@@ -220,10 +238,13 @@ class Tool:
         self.idempotent = idempotent
         self.parallel_safe = parallel_safe
         self.allow_repeated = allow_repeated
+        self.context_policy = context_policy or ToolContextPolicy()
         self.debug_exposure = debug_exposure
         self.resume_policy = resume_policy or (
             ToolResumePolicy.IDEMPOTENT_RETRY if idempotent else ToolResumePolicy.REQUIRE_OPERATOR
         )
+        self.lifecycle = lifecycle
+        self._private_result_encoder = private_result_encoder
         self.version = version
         self._fn = fn
         self._context_parameter: str | None = None
@@ -238,8 +259,12 @@ class Tool:
             raise ConfigurationError("tool timeout_s must be positive or None")
         if not isinstance(debug_exposure, DebugExposure):
             raise ConfigurationError("tool debug_exposure must be a DebugExposure value")
+        if not isinstance(self.context_policy, ToolContextPolicy):
+            raise ConfigurationError("tool context_policy must be a ToolContextPolicy value")
         if not isinstance(self.resume_policy, ToolResumePolicy):
             raise ConfigurationError("tool resume_policy must be a ToolResumePolicy value")
+        if private_result_encoder is not None and not callable(private_result_encoder):
+            raise ConfigurationError("private_result_encoder must be callable or None")
         if self.resume_policy is ToolResumePolicy.IDEMPOTENT_RETRY and not idempotent:
             raise ConfigurationError("idempotent_retry requires idempotent=True")
         if not version.strip() or len(version) > 128:
@@ -328,12 +353,45 @@ class Tool:
         async with asyncio.timeout(self.timeout_s):
             return await invocation
 
+    @property
+    def captures_private_result(self) -> bool:
+        """Whether execution emits a journal-only payload before projection."""
+
+        return self._private_result_encoder is not None
+
+    def encode_private_result(self, result: Any) -> Mapping[str, JsonValue]:
+        """Return normalized journal-only evidence for one raw result.
+
+        The encoder runs before the ordinary result is bounded for the model.
+        Round-tripping through JSON prevents mutable or non-JSON objects from
+        entering the durable event contract.
+        """
+
+        if self._private_result_encoder is None:
+            return MappingProxyType({})
+        raw = self._private_result_encoder(result)
+        if not isinstance(raw, Mapping):
+            raise TypeError("private_result_encoder must return a mapping")
+        encoded = json.dumps(
+            dict(raw),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        if len(encoded.encode("utf-8")) > _MAX_PRIVATE_RESULT_BYTES:
+            raise ValueError("private tool evidence exceeded its hard byte budget")
+        normalized = json.loads(encoded)
+        if not isinstance(normalized, dict):  # pragma: no cover - guarded above
+            raise TypeError("private_result_encoder must return a JSON object")
+        return MappingProxyType(cast(dict[str, JsonValue], normalized))
+
 
 class ToolRegistry:
     """Registry is the only seam through which model-requested code can execute."""
 
     def __init__(self, tools: Iterable[Tool] = ()) -> None:
         self._tools: dict[str, Tool] = {}
+        self._lifecycles: dict[int, ToolLifecycle] = {}
         for registered_tool in tools:
             self.register(registered_tool)
 
@@ -341,6 +399,20 @@ class ToolRegistry:
         if registered_tool.name in self._tools:
             raise ConfigurationError(f"Duplicate tool name: {registered_tool.name!r}")
         self._tools[registered_tool.name] = registered_tool
+        if registered_tool.lifecycle is not None:
+            self._lifecycles[id(registered_tool.lifecycle)] = registered_tool.lifecycle
+
+    async def finalize_execution(self, run_id: str, execution_id: str) -> None:
+        """Release resources owned by one completed or cancelled execution."""
+
+        for lifecycle in tuple(self._lifecycles.values()):
+            await lifecycle.finalize_execution(run_id, execution_id)
+
+    async def close(self) -> None:
+        """Release all resource-owning tools. Safe lifecycle adapters are idempotent."""
+
+        for lifecycle in tuple(self._lifecycles.values()):
+            await lifecycle.close()
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -360,6 +432,7 @@ class ToolRegistry:
         call: ToolCall,
         *,
         run_id: str,
+        execution_id: str | None = None,
         approval_handler: ApprovalHandler | None,
         max_output_chars: int,
         call_key: str | None = None,
@@ -444,6 +517,7 @@ class ToolRegistry:
         try:
             execution_context = ToolExecutionContext(
                 run_id=run_id,
+                execution_id=execution_id or run_id,
                 call_id=call.id,
                 call_key=stable_call_key,
                 operation_id=f"tool:{stable_call_key}",
@@ -452,6 +526,7 @@ class ToolRegistry:
                 workspace_path=workspace_path,
             )
             result = await registered_tool.invoke(arguments, context=execution_context)
+            private_payload = registered_tool.encode_private_result(result)
         except TimeoutError:
             return _error_message(
                 call,
@@ -488,6 +563,7 @@ class ToolRegistry:
             is_error=serialized_error,
             executed=True,
             duration_ms=(time.monotonic() - started) * 1000,
+            private_payload=private_payload,
         )
 
 
@@ -502,6 +578,7 @@ def tool(
     idempotent: bool = False,
     parallel_safe: bool = False,
     allow_repeated: bool = False,
+    context_policy: ToolContextPolicy | None = None,
     debug_exposure: DebugExposure = DebugExposure.METADATA,
     resume_policy: ToolResumePolicy | None = None,
     version: str = "1",
@@ -519,6 +596,7 @@ def tool(
     idempotent: bool = False,
     parallel_safe: bool = False,
     allow_repeated: bool = False,
+    context_policy: ToolContextPolicy | None = None,
     debug_exposure: DebugExposure = DebugExposure.METADATA,
     resume_policy: ToolResumePolicy | None = None,
     version: str = "1",
@@ -535,6 +613,7 @@ def tool(
     idempotent: bool = False,
     parallel_safe: bool = False,
     allow_repeated: bool = False,
+    context_policy: ToolContextPolicy | None = None,
     debug_exposure: DebugExposure = DebugExposure.METADATA,
     resume_policy: ToolResumePolicy | None = None,
     version: str = "1",
@@ -551,6 +630,7 @@ def tool(
             idempotent=idempotent,
             parallel_safe=parallel_safe,
             allow_repeated=allow_repeated,
+            context_policy=context_policy,
             debug_exposure=debug_exposure,
             resume_policy=resume_policy,
             version=version,

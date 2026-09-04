@@ -19,6 +19,7 @@ from react_agent import (
     ToolMessage,
     tool,
 )
+from react_agent.debug_evidence import seal_debug_observation
 from react_agent.models import (
     AgentJournalEvent,
     AgentJournalEventKind,
@@ -27,7 +28,7 @@ from react_agent.models import (
     ModelStreamEvent,
     ModelStreamEventKind,
 )
-from react_agent.tools import DebugExposure
+from react_agent.tools import DebugExposure, Tool
 
 
 class ScriptedModel:
@@ -707,6 +708,61 @@ async def test_full_debug_exposure_is_bounded_and_marks_truncation() -> None:
     ]
     assert len(str(tool_result.data["result"])) <= 256
     assert tool_result.data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_journal_preserves_private_result_before_model_truncation() -> None:
+    observation = seal_debug_observation(
+        {
+            "schema_version": 1,
+            "observation_kind": "python_runtime_debug",
+            "action": "stack",
+            "debug_session_id": "large-debug-session",
+            "state": "stopped",
+            "success": True,
+            "stop_id": 1,
+            "exception": {
+                "type": "RuntimeError",
+                "message": "bounded-evidence-" + ("x" * 4_000),
+            },
+        }
+    )
+
+    async def debug_stack() -> dict[str, object]:
+        """Return a deliberately large sealed debugger observation."""
+
+        return observation
+
+    registered = Tool(
+        debug_stack,
+        name="python_debug_stack",
+        private_result_encoder=lambda result: {"debug_observation": result},
+    )
+    journaled: list[AgentJournalEvent] = []
+    model = ScriptedModel(
+        model_turn(None, ToolCall("large-debug-call", "python_debug_stack", "{}")),
+        model_turn("done"),
+    )
+
+    await ReActAgent(
+        model,
+        [registered],
+        config=AgentConfig(max_tool_output_chars=256),
+    ).run("capture", journal_sink=journaled.append)
+
+    [completed] = [
+        event
+        for event in journaled
+        if event.kind is AgentJournalEventKind.TOOL_COMPLETED
+    ]
+    projected = json.loads(str(completed.private_data["message"]["content"]))
+    private = completed.private_data["tool_private"]
+
+    assert projected["meta"]["truncated"] is True
+    assert private["debug_observation"] == observation
+    model_observation = model.requests[1].transcript[-1]
+    assert isinstance(model_observation, ToolMessage)
+    assert json.loads(model_observation.content)["meta"]["truncated"] is True
 
 
 @pytest.mark.asyncio

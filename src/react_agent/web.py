@@ -23,6 +23,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from .agent import AgentConfig, ReActAgent
+from .context import (
+    ContextGovernor,
+    ContextStrategy,
+    FileContextSummaryStore,
+    ModelContextCompressor,
+)
 from .cost_ledger import MAX_COST_MICROS
 from .events import RunSnapshot
 from .journal import InMemoryRunJournal, RunJournal
@@ -494,6 +500,25 @@ def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
         allow_insecure_http=_truthy_env("OPENAI_ALLOW_INSECURE_HTTP"),
         capabilities=capabilities,
     )
+    raw_context_strategy = os.getenv("REACT_AGENT_CONTEXT_STRATEGY", "tiered")
+    try:
+        context_strategy = ContextStrategy(raw_context_strategy)
+    except ValueError:
+        raise RuntimeError(
+            "REACT_AGENT_CONTEXT_STRATEGY must be tiered, generic, or stop."
+        ) from None
+    summary_root = os.getenv("REACT_AGENT_CONTEXT_SUMMARY_DIR")
+    context_governor = ContextGovernor(
+        strategy=context_strategy,
+        compressor=(
+            None
+            if context_strategy is ContextStrategy.STOP
+            else ModelContextCompressor(model)
+        ),
+        store=(FileContextSummaryStore(summary_root) if summary_root else None),
+        keep_recent_turns=2,
+        max_summary_chars=12_000,
+    )
     agent = ReActAgent(
         model,
         [calculate_expression],
@@ -504,7 +529,9 @@ def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
             max_concurrent_tools=4,
             max_tool_output_chars=8_000,
             max_context_chars=160_000,
+            context_strategy=context_strategy,
         ),
+        context_governor=context_governor,
     )
     return model, agent, model_name, api_mode
 

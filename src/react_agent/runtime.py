@@ -60,6 +60,7 @@ from .models import (
     AgentResumeState,
     AgentStreamEvent,
     AssistantMessage,
+    JsonValue,
     RecoveredToolCall,
     RunStatus,
     StopReason,
@@ -591,6 +592,7 @@ _AGENT_KIND_MAP: Mapping[AgentJournalEventKind, RunEventKind] = MappingProxyType
     {
         AgentJournalEventKind.RUN_STARTED: RunEventKind.RUN_STARTED,
         AgentJournalEventKind.RUN_RESUMED: RunEventKind.RUN_RESUMED,
+        AgentJournalEventKind.CONTEXT_GOVERNED: RunEventKind.CONTEXT_GOVERNED,
         AgentJournalEventKind.MODEL_STARTED: RunEventKind.MODEL_STARTED,
         AgentJournalEventKind.MODEL_COMPLETED: RunEventKind.MODEL_COMPLETED,
         AgentJournalEventKind.MODEL_FAILED: RunEventKind.MODEL_FAILED,
@@ -637,7 +639,11 @@ def agent_event_to_draft(
 
     usage = (
         _usage_from_public(event.public_data)
-        if event.kind is AgentJournalEventKind.MODEL_COMPLETED
+        if event.kind
+        in {
+            AgentJournalEventKind.CONTEXT_GOVERNED,
+            AgentJournalEventKind.MODEL_COMPLETED,
+        }
         else Usage()
     )
     checkpoint = dict(event.private_data) if event.private_data else None
@@ -663,6 +669,30 @@ def agent_event_to_draft(
             and raw_tool_calls >= 0
         ):
             terminal_model_tool_calls = raw_tool_calls
+    raw_compression_calls = event.public_data.get("compression_calls", 0)
+    declared_compression_calls = (
+        raw_compression_calls
+        if isinstance(raw_compression_calls, int)
+        and not isinstance(raw_compression_calls, bool)
+        and raw_compression_calls >= 0
+        else 0
+    )
+    compression_phase = event.public_data.get("compression_phase")
+    if (
+        event.kind is AgentJournalEventKind.CONTEXT_GOVERNED
+        and compression_phase == "projection_completed"
+        and event.public_data.get("compression_accounted_in_terminal") is True
+    ):
+        usage = Usage()
+    compression_calls = (
+        declared_compression_calls
+        if compression_phase in {"completed", "failed", "abandoned"}
+        or (
+            compression_phase in {None, "projection_completed"}
+            and event.public_data.get("compression_accounted_in_terminal") is not True
+        )
+        else 0
+    )
     return RunEventDraft(
         kind=kind,
         privacy=privacy,
@@ -683,7 +713,15 @@ def agent_event_to_draft(
         checkpoint=checkpoint,
         safe_checkpoint=safe_checkpoint,
         usage_delta=usage,
-        model_calls_delta=(1 if event.kind is AgentJournalEventKind.MODEL_STARTED else 0),
+        model_calls_delta=(
+            1
+            if event.kind is AgentJournalEventKind.MODEL_STARTED
+            else (
+                compression_calls
+                if event.kind is AgentJournalEventKind.CONTEXT_GOVERNED
+                else 0
+            )
+        ),
         tool_calls_delta=(
             1
             if event.kind is AgentJournalEventKind.TOOL_PLANNED
@@ -696,6 +734,123 @@ def agent_event_to_draft(
             else 0
         ),
     )
+
+
+def _interrupted_compression_abandonments(
+    events: Sequence[StoredRunEvent],
+    *,
+    execution_id: str,
+) -> tuple[tuple[RunEventDraft, str], ...]:
+    """Close unmatched compression starts before a resumed attempt retries.
+
+    A process can die after the write-ahead ``started`` fact but before the
+    compressor result or failure is durable.  The next execution records that
+    uncertainty explicitly; a content-addressed result already in the summary
+    store can still be reused by the governor, otherwise a fresh call is made.
+    """
+
+    def compression_identity(event: StoredRunEvent) -> tuple[str | None, JsonValue]:
+        private_compression = (
+            event.checkpoint.get("context_compression")
+            if event.checkpoint is not None
+            else None
+        )
+        private_summary_key = (
+            private_compression.get("summary_key")
+            if isinstance(private_compression, Mapping)
+            else None
+        )
+        summary_key = (
+            private_summary_key
+            if isinstance(private_summary_key, str)
+            else event.data.get("summary_key")
+        )
+        source_hash = (
+            private_compression.get("source_hash")
+            if isinstance(private_compression, Mapping)
+            else event.data.get("source_hash")
+        )
+        return (
+            summary_key if isinstance(summary_key, str) and summary_key else None,
+            cast(JsonValue, source_hash),
+        )
+
+    pending: dict[str, list[StoredRunEvent]] = {}
+    terminal_phases = {"completed", "failed", "abandoned"}
+    for event in events:
+        if event.kind is not RunEventKind.CONTEXT_GOVERNED:
+            continue
+        phase = event.data.get("compression_phase")
+        summary_key, _ = compression_identity(event)
+        if summary_key is None:
+            continue
+        if phase == "started":
+            pending.setdefault(summary_key, []).append(event)
+        elif phase in terminal_phases:
+            starts = pending.get(summary_key)
+            if starts:
+                starts.pop()
+                if not starts:
+                    pending.pop(summary_key, None)
+
+    abandonments: list[tuple[RunEventDraft, str]] = []
+    unmatched = sorted(
+        (event for starts in pending.values() for event in starts),
+        key=lambda event: event.sequence,
+    )
+    for started in unmatched:
+        summary_key, source_hash = compression_identity(started)
+        assert summary_key is not None
+        attempted = started.data.get("attempted_model_calls")
+        attempted_calls = (
+            attempted
+            if isinstance(attempted, int)
+            and not isinstance(attempted, bool)
+            and attempted > 0
+            else 1
+        )
+        abandonments.append(
+            (
+                RunEventDraft(
+                    kind=RunEventKind.CONTEXT_GOVERNED,
+                    privacy=PrivacyClass.PRIVATE,
+                    occurred_at=started.occurred_at,
+                    step=started.step,
+                    execution_id=execution_id,
+                    data={
+                        "compression_phase": "abandoned",
+                        "compression_source_chars": started.data.get(
+                            "compression_source_chars"
+                        ),
+                        "compressor_revision": started.data.get(
+                            "compressor_revision"
+                        ),
+                        "attempted_model_calls": attempted_calls,
+                        "compression_calls": attempted_calls,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0,
+                            "cached_input_tokens": None,
+                            "reasoning_output_tokens": None,
+                            "billable_tokens": None,
+                        },
+                        "compression_error": "process_interrupted_before_terminal",
+                        "cost_unknown": True,
+                        "recovered_interruption": True,
+                    },
+                    checkpoint={
+                        "context_compression": {
+                            "summary_key": summary_key,
+                            "source_hash": source_hash,
+                        }
+                    },
+                    model_calls_delta=attempted_calls,
+                ),
+                f"{started.operation_id}:resume_abandoned",
+            )
+        )
+    return tuple(abandonments)
 
 
 def _cost_payload(record: object) -> dict[str, Any]:
@@ -1077,9 +1232,44 @@ class _JournalWriter:
                 tool_manifest_hash=self.runtime.agent.tool_manifest_hash,
                 model_attempt=attempt,
             )
-            if event.kind is AgentJournalEventKind.MODEL_COMPLETED:
+            raw_compression_calls = event.public_data.get("compression_calls")
+            compression_phase = event.public_data.get("compression_phase")
+            compression_has_calls = (
+                event.kind is AgentJournalEventKind.CONTEXT_GOVERNED
+                and isinstance(raw_compression_calls, int)
+                and not isinstance(raw_compression_calls, bool)
+                and raw_compression_calls > 0
+            )
+            terminal_compression = compression_has_calls and compression_phase in {
+                "completed",
+                "failed",
+                "abandoned",
+            }
+            legacy_projection_compression = (
+                compression_has_calls
+                and compression_phase in {None, "projection_completed"}
+                and event.public_data.get("compression_accounted_in_terminal") is not True
+            )
+            unknown_compression = (
+                terminal_compression and event.public_data.get("cost_unknown") is True
+            )
+            priced_compression = (
+                terminal_compression and not unknown_compression
+            ) or legacy_projection_compression
+            if event.kind is AgentJournalEventKind.MODEL_COMPLETED or priced_compression:
                 draft, cost_draft = self.runtime._price_model_event(
                     draft, event=event, attempt=attempt
+                )
+                await self._append_many_unlocked(
+                    (
+                        (draft, operation_id),
+                        (cost_draft, f"cost:{operation_id}"),
+                    )
+                )
+            elif unknown_compression:
+                draft, cost_draft = self.runtime._unknown_compression_cost_event(
+                    draft,
+                    event=event,
                 )
                 await self._append_many_unlocked(
                     (
@@ -1418,6 +1608,7 @@ class AgentRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         for writer in writers:
             await writer.release()
+        await self.agent.registry.close()
 
     async def _reserve_session_request(
         self,
@@ -1673,12 +1864,13 @@ class AgentRuntime:
 
     async def _submit_resume(self, run_id: str) -> RunHandle:
         async with self._coordination_lock:
+            snapshot = await self.load(run_id)
+            if snapshot.state is RunState.NEEDS_RECONCILIATION:
+                raise ReconciliationRequired("operator reconciliation is required")
             active = self._tasks.get(run_id)
             if active is not None and not active.done():
-                snapshot = await self.load(run_id)
                 assert snapshot.session_id is not None
                 return RunHandle(run_id, snapshot.session_id, snapshot.execution_id, False)
-            snapshot = await self.load(run_id)
             if snapshot.session_id is None:
                 raise ResumeRejected("run has no Session identity")
             if snapshot.state is RunState.TERMINAL:
@@ -1691,8 +1883,6 @@ class AgentRuntime:
                 raise ResumeRejected(
                     "run owns a durable workspace; configure its workspace adapter to Resume"
                 )
-            if snapshot.state is RunState.NEEDS_RECONCILIATION:
-                raise ReconciliationRequired("operator reconciliation is required")
             await self._claim_session_run(snapshot.session_id, run_id)
             first = (await self.journal.read(run_id, after_sequence=0))[0]
             raw_version = first.data.get("session_version", 0)
@@ -2088,6 +2278,14 @@ class AgentRuntime:
             and action is ResolutionAction.USE_RESULT
         ):
             raise RuntimeConflict("workspace reconciliation does not accept a tool result")
+        recovery_tool = snapshot.tools.get(command.call_key)
+        if (
+            action is ResolutionAction.RETRY
+            and command.call_key != _WORKSPACE_RECONCILIATION_KEY
+            and recovery_tool is not None
+            and recovery_tool.resume_policy == ToolResumePolicy.NEVER_RETRY.value
+        ):
+            raise RuntimeConflict("tool resume policy permanently forbids retry")
         await self._claim_session_run(snapshot.session_id, command.run_id)
         durable_events = await self.journal.read(command.run_id, after_sequence=0)
         if (
@@ -2252,16 +2450,22 @@ class AgentRuntime:
         expected_session_version: int,
     ) -> None:
         del expected_session_version
-        result = await self.agent.run(
-            prompt,
-            history=cast(Sequence[Any], history),
-            run_id=writer.run_id,
-            execution_id=writer.execution_id,
-            stream_sink=self._buses.setdefault(writer.run_id, _LiveBus()).publish,
-            journal_sink=writer.record_agent,
-            side_effect_guard=writer.guard,
-            workspace_path=self._workspace_paths.get(writer.session_id),
-        )
+        try:
+            result = await self.agent.run(
+                prompt,
+                history=cast(Sequence[Any], history),
+                run_id=writer.run_id,
+                execution_id=writer.execution_id,
+                stream_sink=self._buses.setdefault(writer.run_id, _LiveBus()).publish,
+                journal_sink=writer.record_agent,
+                side_effect_guard=writer.guard,
+                workspace_path=self._workspace_paths.get(writer.session_id),
+            )
+        finally:
+            await self.agent.registry.finalize_execution(
+                writer.run_id,
+                writer.execution_id,
+            )
         await self._finalize(writer, result)
 
     @staticmethod
@@ -2952,6 +3156,29 @@ class AgentRuntime:
                 ),
                 operation_id=f"{action.operation_id}:abandoned",
             )
+        for draft, operation_id in _interrupted_compression_abandonments(
+            durable_history,
+            execution_id=writer.execution_id,
+        ):
+            lifecycle_event = AgentJournalEvent(
+                kind=AgentJournalEventKind.CONTEXT_GOVERNED,
+                run_id=writer.run_id,
+                execution_id=writer.execution_id,
+                operation_id=operation_id,
+                timestamp=draft.occurred_at or 0.0,
+                step=draft.step,
+                public_data=draft.data,
+            )
+            priced_draft, cost_draft = self._unknown_compression_cost_event(
+                draft,
+                event=lifecycle_event,
+            )
+            await writer.append_many(
+                (
+                    (priced_draft, operation_id),
+                    (cost_draft, f"cost:{operation_id}"),
+                )
+            )
         snapshot = await self.load(writer.run_id)
 
         if not await self._prepare_workspace_resume(writer, snapshot):
@@ -3022,16 +3249,22 @@ class AgentRuntime:
                 "durable facts do not identify a terminal result or safe continuation"
             )
 
-        result = await self.agent.run(
-            "resume",
-            run_id=writer.run_id,
-            execution_id=writer.execution_id,
-            stream_sink=self._buses.setdefault(writer.run_id, _LiveBus()).publish,
-            journal_sink=writer.record_agent,
-            resume_state=resume_state,
-            side_effect_guard=writer.guard,
-            workspace_path=self._workspace_paths.get(writer.session_id),
-        )
+        try:
+            result = await self.agent.run(
+                "resume",
+                run_id=writer.run_id,
+                execution_id=writer.execution_id,
+                stream_sink=self._buses.setdefault(writer.run_id, _LiveBus()).publish,
+                journal_sink=writer.record_agent,
+                resume_state=resume_state,
+                side_effect_guard=writer.guard,
+                workspace_path=self._workspace_paths.get(writer.session_id),
+            )
+        finally:
+            await self.agent.registry.finalize_execution(
+                writer.run_id,
+                writer.execution_id,
+            )
         await self._finalize(writer, result)
 
     @staticmethod
@@ -3050,6 +3283,7 @@ class AgentRuntime:
         """
 
         progress_kinds = {
+            RunEventKind.CONTEXT_GOVERNED,
             RunEventKind.MODEL_STARTED,
             RunEventKind.MODEL_COMPLETED,
             RunEventKind.MODEL_FAILED,
@@ -3229,6 +3463,14 @@ class AgentRuntime:
             call = self._tool_call(tool.call)
             message = transcript_item_from_json(tool.message)
             if isinstance(message, ToolMessage):
+                if tool.private_payload is not None:
+                    message = replace(
+                        message,
+                        private_payload=cast(
+                            Mapping[str, JsonValue],
+                            tool.private_payload,
+                        ),
+                    )
                 completed.append(
                     RecoveredToolCall(
                         call,
@@ -3495,8 +3737,18 @@ class AgentRuntime:
             if isinstance(raw_response_model, str) and raw_response_model.strip()
             else self.model_name
         )
+        model_role = (
+            "context_compressor"
+            if event.kind is AgentJournalEventKind.CONTEXT_GOVERNED
+            else "agent"
+        )
+        cost_operation_id = (
+            f"context_compressor:{event.operation_id}"
+            if model_role == "context_compressor"
+            else f"model:s{event.step}:a{attempt}"
+        )
         quote = self.pricing.quote(
-            operation_id=f"model:s{event.step}:a{attempt}",
+            operation_id=cost_operation_id,
             provider=self.provider_name,
             model=self.model_name,
             response_model=response_model,
@@ -3509,7 +3761,11 @@ class AgentRuntime:
             ),
             at=datetime.fromtimestamp(event.timestamp, tz=UTC),
             record_id=hashlib.sha256(
-                f"{event.run_id}:{event.step}:{attempt}:cost".encode()
+                (
+                    f"{event.run_id}:{event.step}:{attempt}:cost"
+                    if model_role == "agent"
+                    else f"{event.run_id}:{cost_operation_id}:cost"
+                ).encode()
             ).hexdigest()[:32],
         )
         cost_data = _cost_payload(quote)
@@ -3523,6 +3779,8 @@ class AgentRuntime:
                 "currency": quote.currency,
             }
         )
+        if model_role != "agent":
+            model_data["model_role"] = model_role
         return (
             replace(draft, data=model_data),
             RunEventDraft(
@@ -3531,6 +3789,73 @@ class AgentRuntime:
                 step=event.step,
                 execution_id=event.execution_id,
                 data=cost_data,
+            ),
+        )
+
+    def _unknown_compression_cost_event(
+        self,
+        draft: RunEventDraft,
+        *,
+        event: AgentJournalEvent,
+    ) -> tuple[RunEventDraft, RunEventDraft]:
+        """Create an atomic unknown-cost record for an interrupted compressor."""
+
+        usage = draft.usage_delta
+        raw_response_model = event.public_data.get("response_model")
+        response_model = (
+            raw_response_model
+            if isinstance(raw_response_model, str) and raw_response_model.strip()
+            else self.model_name
+        )
+        cost_operation_id = f"context_compressor:{event.operation_id}"
+        unknown_reason = event.public_data.get("compression_error")
+        if not isinstance(unknown_reason, str) or not unknown_reason:
+            unknown_reason = "compressor_cost_not_fully_observed"
+        model_data = dict(draft.data)
+        model_data.update(
+            {
+                "provider": self.provider_name,
+                "request_model": self.model_name,
+                "response_model": response_model,
+                "model_role": "context_compressor",
+                "cost_micros": None,
+                "currency": self.pricing.default_currency,
+                "cost_unknown": True,
+                "unknown_reason": unknown_reason,
+            }
+        )
+        record_id = hashlib.sha256(
+            f"{event.run_id}:{cost_operation_id}:unknown-cost".encode()
+        ).hexdigest()[:32]
+        return (
+            replace(draft, data=model_data),
+            RunEventDraft(
+                kind=RunEventKind.COST_RECORDED,
+                occurred_at=event.timestamp,
+                step=event.step,
+                execution_id=event.execution_id,
+                data={
+                    "record_id": record_id,
+                    "operation_id": cost_operation_id,
+                    "kind": "estimate",
+                    "amount_micros": None,
+                    "currency": self.pricing.default_currency,
+                    "provider": self.provider_name,
+                    "model": response_model,
+                    "request_model": self.model_name,
+                    "source": "catalog_estimate",
+                    "catalog_version": self.pricing.version,
+                    "price_version": None,
+                    "priced_at": datetime.fromtimestamp(event.timestamp, tz=UTC).isoformat(),
+                    "estimated": True,
+                    "unknown_reason": unknown_reason,
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cached_input_tokens": usage.cached_input_tokens,
+                        "reasoning_output_tokens": usage.reasoning_output_tokens,
+                    },
+                },
             ),
         )
 
@@ -3795,6 +4120,12 @@ class AgentRuntime:
             raise ResumeRejected("run result has an invalid Agent event projection") from exc
         status = RunStatus(str(snapshot.result.get("status", snapshot.status)))
         reason = StopReason(str(snapshot.result.get("stop_reason", snapshot.stop_reason)))
+        raw_context_metrics = snapshot.result.get("context_metrics", {})
+        context_metrics = (
+            MappingProxyType(dict(cast(Mapping[str, JsonValue], raw_context_metrics)))
+            if isinstance(raw_context_metrics, Mapping)
+            else MappingProxyType({})
+        )
         return AgentResult(
             output=(
                 str(snapshot.result["output"])
@@ -3813,6 +4144,7 @@ class AgentRuntime:
             error=(
                 str(snapshot.result["error"]) if snapshot.result.get("error") is not None else None
             ),
+            context_metrics=context_metrics,
         )
 
     @staticmethod

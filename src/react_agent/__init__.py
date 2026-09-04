@@ -1,7 +1,32 @@
 """A bounded ReAct-style agent framework for OpenAI-compatible APIs."""
 
 from .agent import AgentConfig, EventSink, ReActAgent, StreamSink
+from .context import (
+    ContextCompression,
+    ContextCompressor,
+    ContextGovernanceReport,
+    ContextGovernor,
+    ContextProjection,
+    ContextStrategy,
+    FileContextSummaryStore,
+    InMemoryContextSummaryStore,
+    ModelContextCompressor,
+    ObservationEffect,
+    ToolContextPolicy,
+    deterministic_evict,
+    estimate_context_chars,
+)
 from .cost import Price, PricingCatalog
+from .debug_event_log import load_debug_event_log, write_debug_event_log
+from .debug_evidence import (
+    DebugEvidenceArtifacts,
+    DebugEvidenceError,
+    DebugObservationError,
+    generate_debug_evidence,
+    seal_debug_observation,
+    verify_debug_observation,
+)
+from .debug_tools import create_python_debug_tools
 from .errors import ConfigurationError, ModelInvocationError, ReActAgentError
 from .journal import InMemoryRunJournal, RunJournal
 from .models import (
@@ -39,6 +64,12 @@ from .runtime import (
     RuntimeEvent,
     StartRun,
 )
+from .runtime_debugger import (
+    DebugBreakpoint,
+    DebuggerError,
+    DebugSessionState,
+    PythonRuntimeDebugger,
+)
 from .telemetry import TraceReference, create_telemetry
 from .tools import (
     ApprovalHandler,
@@ -66,13 +97,28 @@ __all__ = [
     "AssistantMessage",
     "CancelRun",
     "ConfigurationError",
+    "ContextCompression",
+    "ContextCompressor",
+    "ContextGovernanceReport",
+    "ContextGovernor",
+    "ContextProjection",
+    "ContextStrategy",
+    "DebugBreakpoint",
+    "DebugEvidenceArtifacts",
+    "DebugEvidenceError",
     "DebugExposure",
+    "DebugObservationError",
+    "DebugSessionState",
+    "DebuggerError",
     "EventKind",
     "EventSink",
+    "FileContextSummaryStore",
     "ForkRun",
     "GitWorktreeWorkspace",
+    "InMemoryContextSummaryStore",
     "InMemoryRunJournal",
     "Model",
+    "ModelContextCompressor",
     "ModelInvocationError",
     "ModelOutcome",
     "ModelRequest",
@@ -80,11 +126,13 @@ __all__ = [
     "ModelStreamEvent",
     "ModelStreamEventKind",
     "ModelStreamSink",
+    "ObservationEffect",
     "OpenAIModel",
     "PostgresRunJournal",
     "Price",
     "PricingCatalog",
     "ProviderCapabilities",
+    "PythonRuntimeDebugger",
     "ReActAgent",
     "ReActAgentError",
     "ResolutionAction",
@@ -100,6 +148,7 @@ __all__ = [
     "StreamingModel",
     "Tool",
     "ToolCall",
+    "ToolContextPolicy",
     "ToolExecutionContext",
     "ToolMessage",
     "ToolRegistry",
@@ -108,6 +157,14 @@ __all__ = [
     "TraceReference",
     "Usage",
     "UserMessage",
+    "create_python_debug_tools",
     "create_telemetry",
+    "deterministic_evict",
+    "estimate_context_chars",
+    "generate_debug_evidence",
+    "load_debug_event_log",
+    "seal_debug_observation",
     "tool",
+    "verify_debug_observation",
+    "write_debug_event_log",
 ]

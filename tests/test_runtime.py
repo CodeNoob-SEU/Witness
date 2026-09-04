@@ -53,7 +53,7 @@ from react_agent.telemetry import (
     TelemetryEventKind,
     TraceReference,
 )
-from react_agent.tools import ToolExecutionContext, tool
+from react_agent.tools import ToolExecutionContext, ToolResumePolicy, tool
 from react_agent.workspace import FakeWorkspaceCheckpointStore
 
 
@@ -2236,6 +2236,7 @@ async def interrupted_charge_run(
     final_answer: str,
     *,
     journal: InMemoryRunJournal | None = None,
+    resume_policy: ToolResumePolicy | None = None,
 ) -> tuple[
     AgentRuntime,
     InMemoryRunJournal,
@@ -2250,7 +2251,7 @@ async def interrupted_charge_run(
     block_first_call = True
     invocations: list[ToolExecutionContext] = []
 
-    @tool(version="v1")
+    @tool(version="v1", resume_policy=resume_policy)
     async def charge(
         amount: int,
         *,
@@ -2402,6 +2403,29 @@ async def test_resolve_retry_replays_only_after_explicit_operator_action() -> No
         if event.kind is RunEventKind.RECONCILIATION_RESOLVED
     )
     assert resolved.data["action"] == ResolutionAction.RETRY.value
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_retry_honors_never_retry_policy() -> None:
+    runtime, journal, _, run_id, invocations, model = await interrupted_charge_run(
+        "must remain unused",
+        resume_policy=ToolResumePolicy.NEVER_RETRY,
+    )
+
+    with pytest.raises(RuntimeConflict, match="permanently forbids retry"):
+        await runtime.submit(
+            ResolveRun(
+                run_id=run_id,
+                call_key="s1:t0",
+                action=ResolutionAction.RETRY,
+            )
+        )
+
+    events = await journal.read(run_id)
+    assert len(invocations) == 1
+    assert model.requests == []
+    assert not any(event.kind is RunEventKind.RECONCILIATION_RESOLVED for event in events)
     await runtime.close()
 
 

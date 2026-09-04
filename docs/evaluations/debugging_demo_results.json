@@ -1,0 +1,69 @@
+{
+  "acceptance": {
+    "all_7_tools_called": true,
+    "expected_locals_recall_1": true,
+    "five_replays_byte_identical": true,
+    "mcp_initialize_and_7_tools": true,
+    "mcp_schema_parity": true,
+    "no_orphan_processes": true,
+    "required_evidence_coverage_1": true,
+    "server_stderr_empty": true,
+    "suspicious_frame_exact": true,
+    "two_layer_internal_consistency_checks": true,
+    "uncaught_exception_observed": true,
+    "verified_breakpoint": true,
+    "zero_report_external_calls": true
+  },
+  "all_acceptance_passed": true,
+  "benchmark": "runtime-debugging-golden-demo",
+  "breakpoint_line": 42,
+  "evidence_payload_sha256": "6d8a469c5a5306c0c9c1b40e94e7a50ec7e209f0f003ca379fcbe0e33e1d0670",
+  "exception_stop_id": 2,
+  "hash_check_scope": {
+    "full_chain_rewrite_resistance_tested": false,
+    "mechanism": "unkeyed-sha256",
+    "provides": "internal-consistency-mismatch-detection",
+    "requires_trusted_external_head_for_authenticity": true
+  },
+  "journal_head_hash": "e0209afa53d2f6486150e0b11d65eb0250c84a32948985394de03014dcdd1483",
+  "mcp_protocol_version": "2025-11-25",
+  "mcp_tool_schema_sha256": "63538e85297bb1b6ac6523a0cea860aa33ab8de2e5418a9adec7829aecb8a4cf",
+  "metrics": {
+    "active_debuggee_processes": 4,
+    "breakpoint_exact": true,
+    "debug_tool_calls": 7,
+    "elapsed_ms": 1435.659,
+    "event_count": 23,
+    "expected_locals_recall": 1.0,
+    "mcp_schema_parity": true,
+    "mcp_schema_tool_count": 7,
+    "mcp_tools_listed": 7,
+    "orphan_processes": 0,
+    "process_check_supported": true,
+    "process_reaped": true,
+    "replay_debugger_calls": 0,
+    "report_json_hashes_unique": 1,
+    "report_markdown_hashes_unique": 1,
+    "report_model_calls": 0,
+    "required_evidence_coverage": 1.0,
+    "server_stderr_empty": true,
+    "stale_event_hash_mismatch_detected": true,
+    "stale_observation_digest_mismatch_detected": true,
+    "suspicious_frame_exact": true
+  },
+  "server": {
+    "description": "Python-only stdio DAP debugger with deterministic evidence logging.",
+    "icons": null,
+    "name": "react-agent-python-runtime-debugger",
+    "title": "React Agent Python Runtime Debugger",
+    "version": "1.0.0",
+    "website_url": null
+  },
+  "target": "examples/runtime_debug_demo/buggy_pricing.py",
+  "transport": "official-mcp-v2-stdio",
+  "versions": {
+    "debugpy": "1.8.21",
+    "mcp": "2.0.0",
+    "python": "3.12.7"
+  }
+}

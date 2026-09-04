@@ -121,7 +121,22 @@ class ToolMessage:
     executed: bool = False
     cached: bool = False
     duration_ms: float = 0.0
+    # The model projection and durable private evidence have different
+    # consumers. This payload is never serialized into the transcript; the
+    # Agent journal stores it beside ``message`` instead.
+    private_payload: Mapping[str, JsonValue] = field(
+        default_factory=lambda: MappingProxyType({}),
+        repr=False,
+        compare=False,
+    )
     role: Literal["tool"] = field(default="tool", init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "private_payload",
+            MappingProxyType(dict(self.private_payload)),
+        )
 
 
 TranscriptItem: TypeAlias = UserMessage | AssistantMessage | ToolMessage
@@ -189,6 +204,7 @@ ModelStreamSink: TypeAlias = Callable[[ModelStreamEvent], Awaitable[None] | None
 
 class EventKind(StrEnum):
     RUN_STARTED = "run_started"
+    CONTEXT_GOVERNED = "context_governed"
     MODEL_STARTED = "model_started"
     MODEL_COMPLETED = "model_completed"
     MODEL_FAILED = "model_failed"
@@ -281,6 +297,7 @@ class AgentStreamEventKind(StrEnum):
     """Ephemeral, opt-in events for a live Agent debugging workbench."""
 
     RUN_STARTED = "run_started"
+    CONTEXT_GOVERNED = "context_governed"
     MODEL_STARTED = "model_started"
     MODEL_TEXT_DELTA = "model_text_delta"
     MODEL_REFUSAL_DELTA = "model_refusal_delta"
@@ -321,6 +338,7 @@ class AgentJournalEventKind(StrEnum):
 
     RUN_STARTED = "run.started"
     RUN_RESUMED = "run.resumed"
+    CONTEXT_GOVERNED = "context.governed"
     MODEL_STARTED = "model.started"
     MODEL_COMPLETED = "model.completed"
     MODEL_FAILED = "model.failed"
@@ -390,6 +408,9 @@ class AgentResult:
     transcript: tuple[TranscriptItem, ...] = field(repr=False)
     events: tuple[AgentEvent, ...] = field(repr=False)
     error: str | None = None
+    context_metrics: Mapping[str, JsonValue] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=witness-context-live-base:pytorch-cu130
+FROM ${BASE_IMAGE}
+
+RUN python3 -m pip install --no-cache-dir \
+    "accelerate==1.10.1" \
+    "sentencepiece==0.2.1" \
+    "transformers==4.56.2"
+
+WORKDIR /benchmark
+COPY benchmarks/context_live_model_server.py /benchmark/context_live_model_server.py
+
+ENTRYPOINT ["python3", "/benchmark/context_live_model_server.py"]

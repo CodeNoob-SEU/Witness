@@ -27,6 +27,7 @@ class RunEventKind(StrEnum):
     RUN_STARTED = "run_started"
     RUN_RESUMED = "run_resumed"
     RUN_FORKED = "run_forked"
+    CONTEXT_GOVERNED = "context_governed"
     MODEL_STARTED = "model_started"
     MODEL_COMPLETED = "model_completed"
     MODEL_FAILED = "model_failed"
@@ -650,6 +651,7 @@ class ToolRecovery:
     resume_policy: str | None = None
     call: Mapping[str, Any] | None = field(default=None, repr=False)
     message: Mapping[str, Any] | None = field(default=None, repr=False)
+    private_payload: Mapping[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -958,10 +960,24 @@ def fold_events(events: Sequence[StoredRunEvent]) -> RunSnapshot:
             checkpoint_message = (
                 event.checkpoint.get("message") if event.checkpoint is not None else None
             )
+            checkpoint_private = (
+                event.checkpoint.get("tool_private")
+                if event.checkpoint is not None
+                else None
+            )
             message = (
                 checkpoint_message
                 if isinstance(checkpoint_message, Mapping)
                 else (previous_tool.message if previous_tool is not None else None)
+            )
+            private_payload = (
+                checkpoint_private
+                if isinstance(checkpoint_private, Mapping)
+                else (
+                    previous_tool.private_payload
+                    if previous_tool is not None
+                    else None
+                )
             )
             tools[event.call_key] = ToolRecovery(
                 call_key=event.call_key,
@@ -973,6 +989,7 @@ def fold_events(events: Sequence[StoredRunEvent]) -> RunSnapshot:
                 resume_policy=(previous_tool.resume_policy if previous_tool else None),
                 call=(previous_tool.call if previous_tool else None),
                 message=message,
+                private_payload=private_payload,
             )
             state = _state_from_pending(pending)
         elif event.kind is RunEventKind.RECONCILIATION_REQUIRED:

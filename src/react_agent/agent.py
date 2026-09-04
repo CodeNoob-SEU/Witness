@@ -14,6 +14,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .context import (
+    ContextCompressionLifecycleEvent,
+    ContextGovernor,
+    ContextStrategy,
+    ModelContextCompressor,
+)
 from .errors import ConfigurationError, ModelInvocationError
 from .models import (
     AgentEvent,
@@ -33,7 +39,6 @@ from .models import (
     StopReason,
     ToolCall,
     ToolMessage,
-    ToolSpec,
     TranscriptItem,
     Usage,
     UserMessage,
@@ -63,8 +68,20 @@ def _usage_data(usage: Usage) -> dict[str, JsonValue]:
     }
 
 
+def _tool_checkpoint(message: ToolMessage) -> dict[str, JsonValue]:
+    """Separate the model-facing ToolMessage from journal-only evidence."""
+
+    checkpoint: dict[str, JsonValue] = {
+        "message": transcript_item_to_json(message),
+    }
+    if message.private_payload:
+        checkpoint["tool_private"] = dict(message.private_payload)
+    return checkpoint
+
+
 _STREAM_KIND_BY_EVENT_KIND: dict[EventKind, AgentStreamEventKind] = {
     EventKind.RUN_STARTED: AgentStreamEventKind.RUN_STARTED,
+    EventKind.CONTEXT_GOVERNED: AgentStreamEventKind.CONTEXT_GOVERNED,
     EventKind.MODEL_STARTED: AgentStreamEventKind.MODEL_STARTED,
     EventKind.MODEL_COMPLETED: AgentStreamEventKind.MODEL_COMPLETED,
     EventKind.MODEL_FAILED: AgentStreamEventKind.MODEL_FAILED,
@@ -87,6 +104,9 @@ class AgentConfig:
     max_concurrent_tools: int = 8
     max_tool_output_chars: int = 20_000
     max_context_chars: int = 200_000
+    context_strategy: ContextStrategy = ContextStrategy.TIERED
+    context_keep_recent_turns: int = 2
+    context_summary_max_chars: int = 12_000
     parallel_tool_calls: bool = True
     repeated_action_limit: int = 3
 
@@ -103,39 +123,14 @@ class AgentConfig:
             raise ConfigurationError("max_tool_output_chars must be at least 256")
         if self.max_context_chars < 1:
             raise ConfigurationError("max_context_chars must be positive")
+        if not isinstance(self.context_strategy, ContextStrategy):
+            raise ConfigurationError("context_strategy must be a ContextStrategy")
+        if self.context_keep_recent_turns < 1:
+            raise ConfigurationError("context_keep_recent_turns must be positive")
+        if self.context_summary_max_chars < 64:
+            raise ConfigurationError("context_summary_max_chars must be at least 64")
         if self.repeated_action_limit < 2:
             raise ConfigurationError("repeated_action_limit must be at least 2")
-
-
-def _estimate_context_chars(
-    transcript: Sequence[TranscriptItem],
-    *,
-    instructions: str,
-    tool_specs: Sequence[ToolSpec],
-) -> int:
-    total = len(instructions)
-    total += sum(
-        len(json.dumps(spec.parameters, ensure_ascii=False, default=str))
-        + len(spec.name)
-        + len(spec.description)
-        for spec in tool_specs
-    )
-    for item in transcript:
-        if isinstance(item, UserMessage):
-            total += len(item.content)
-        elif isinstance(item, ToolMessage):
-            total += len(item.call_id) + len(item.name) + len(item.content)
-        elif item.raw_items:
-            total += sum(
-                len(json.dumps(raw_item, ensure_ascii=False, default=str))
-                for raw_item in item.raw_items
-            )
-        else:
-            total += len(item.content or "")
-            total += sum(
-                len(call.id) + len(call.name) + len(call.arguments) for call in item.tool_calls
-            )
-    return total
 
 
 class ReActAgent:
@@ -151,6 +146,7 @@ class ReActAgent:
         approval_handler: ApprovalHandler | None = None,
         event_sink: EventSink | None = None,
         journal_sink: JournalSink | None = None,
+        context_governor: ContextGovernor | None = None,
     ) -> None:
         if not instructions.strip():
             raise ConfigurationError("instructions must not be empty")
@@ -161,6 +157,12 @@ class ReActAgent:
         self.approval_handler = approval_handler
         self.event_sink = event_sink
         self.journal_sink = journal_sink
+        self.context_governor = context_governor or ContextGovernor(
+            strategy=self.config.context_strategy,
+            compressor=ModelContextCompressor(model),
+            keep_recent_turns=self.config.context_keep_recent_turns,
+            max_summary_chars=self.config.context_summary_max_chars,
+        )
 
     @property
     def tool_manifest_hash(self) -> str:
@@ -174,6 +176,11 @@ class ReActAgent:
                 },
                 "version": registered.version,
                 "resume_policy": registered.resume_policy.value,
+                "context_policy": {
+                    "effect": registered.context_policy.effect.value,
+                    "identity_fields": registered.context_policy.identity_fields,
+                },
+                "captures_private_result": registered.captures_private_result,
             }
             for registered in self.registry.tools
         ]
@@ -185,12 +192,50 @@ class ReActAgent:
         payload = {
             "instructions": self.instructions,
             "config": asdict(self.config),
+            "context_governor_revision": self.context_governor.revision,
             "tool_manifest_hash": self.tool_manifest_hash,
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode()).hexdigest()
 
     async def run(
+        self,
+        prompt: str,
+        *,
+        history: Sequence[TranscriptItem] = (),
+        run_id: str | None = None,
+        execution_id: str | None = None,
+        event_sink: EventSink | None = None,
+        stream_sink: StreamSink | None = None,
+        journal_sink: JournalSink | None = None,
+        resume_state: AgentResumeState | None = None,
+        side_effect_guard: SideEffectGuard | None = None,
+        workspace_path: Path | None = None,
+    ) -> AgentResult:
+        """Run one fenced execution and always release resource-owning tools."""
+
+        current_run_id = run_id or uuid.uuid4().hex
+        current_execution_id = execution_id or uuid.uuid4().hex
+        try:
+            return await self._run(
+                prompt,
+                history=history,
+                run_id=current_run_id,
+                execution_id=current_execution_id,
+                event_sink=event_sink,
+                stream_sink=stream_sink,
+                journal_sink=journal_sink,
+                resume_state=resume_state,
+                side_effect_guard=side_effect_guard,
+                workspace_path=workspace_path,
+            )
+        finally:
+            await self.registry.finalize_execution(
+                current_run_id,
+                current_execution_id,
+            )
+
+    async def _run(
         self,
         prompt: str,
         *,
@@ -245,6 +290,18 @@ class ReActAgent:
         model_first_delta_at: dict[int, float] = {}
         stream_sequence = 0
         stream_lock = asyncio.Lock()
+        context_metrics: dict[str, int] = {
+            "projections": 0,
+            "peak_input_chars": 0,
+            "peak_projected_chars": 0,
+            "deterministic_evictions": 0,
+            "deterministic_removed_chars": 0,
+            "compression_calls": 0,
+            "compression_cache_hits": 0,
+            "compression_source_chars": 0,
+            "hard_fallbacks": 0,
+            "hard_dropped_items": 0,
+        }
 
         async def record(
             kind: AgentJournalEventKind,
@@ -455,6 +512,7 @@ class ReActAgent:
                 transcript=tuple(transcript),
                 events=tuple(events),
                 error=error,
+                context_metrics=MappingProxyType(dict(context_metrics)),
             )
 
         async def finish(final: AgentResult, *, step: int) -> AgentResult:
@@ -477,11 +535,13 @@ class ReActAgent:
                     "tool_calls": final.tool_calls,
                     "tool_executions": final.tool_executions,
                     "usage": _usage_data(final.usage),
+                    "context": dict(final.context_metrics),
                 },
                 private_data={
                     "output": final.output,
                     "error": final.error,
                     "transcript": transcript_to_json(final.transcript),
+                    "context_metrics": dict(final.context_metrics),
                     "agent_events": [
                         agent_event_to_json(event)
                         for event in (*final.events, completion_event)
@@ -501,6 +561,7 @@ class ReActAgent:
                     "tool_executions": final.tool_executions,
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
                     "usage": _usage_data(final.usage),
+                    "context": dict(final.context_metrics),
                 },
             )
             return replace(final, events=tuple(events))
@@ -541,7 +602,7 @@ class ReActAgent:
                         call=call,
                         call_key=call_key,
                         public_data=reused_public,
-                        private_data={"message": transcript_item_to_json(reused_result)},
+                        private_data=_tool_checkpoint(reused_result),
                     )
                     await emit(
                         EventKind.TOOL_REUSED,
@@ -578,7 +639,7 @@ class ReActAgent:
                     call=call,
                     call_key=call_key,
                     public_data=conflict_public,
-                    private_data={"message": transcript_item_to_json(conflict)},
+                    private_data=_tool_checkpoint(conflict),
                 )
                 await emit(
                     EventKind.TOOL_COMPLETED,
@@ -629,6 +690,7 @@ class ReActAgent:
             tool_result = await self.registry.execute(
                 call,
                 run_id=current_run_id,
+                execution_id=current_execution_id,
                 approval_handler=self.approval_handler,
                 max_output_chars=self.config.max_tool_output_chars,
                 call_key=call_key,
@@ -647,7 +709,7 @@ class ReActAgent:
                 call=call,
                 call_key=call_key,
                 public_data=completed_public,
-                private_data={"message": transcript_item_to_json(tool_result)},
+                private_data=_tool_checkpoint(tool_result),
             )
             await emit(
                 EventKind.TOOL_COMPLETED,
@@ -791,6 +853,9 @@ class ReActAgent:
                 "max_wall_time_s": self.config.max_wall_time_s,
                 "max_concurrent_tools": self.config.max_concurrent_tools,
                 "max_context_chars": self.config.max_context_chars,
+                "context_strategy": self.config.context_strategy.value,
+                "context_keep_recent_turns": self.config.context_keep_recent_turns,
+                "context_summary_max_chars": self.config.context_summary_max_chars,
                 "parallel_tool_calls": self.config.parallel_tool_calls,
                 "repeated_action_limit": self.config.repeated_action_limit,
             },
@@ -849,12 +914,158 @@ class ReActAgent:
 
         for step in range(start_step, self.config.max_steps + 1):
             tool_specs = self.registry.specs
-            context_chars = _estimate_context_chars(
-                transcript,
-                instructions=self.instructions,
-                tool_specs=tool_specs,
+
+            async def record_compression_lifecycle(
+                event: ContextCompressionLifecycleEvent,
+                lifecycle_step: int = step,
+            ) -> None:
+                await record(
+                    AgentJournalEventKind.CONTEXT_GOVERNED,
+                    (
+                        f"context:s{lifecycle_step}:compression:{event.phase.value}:"
+                        f"{current_execution_id}"
+                    ),
+                    step=lifecycle_step,
+                    public_data={
+                        "compression_phase": event.phase.value,
+                        "compression_source_chars": event.source_chars,
+                        "compressor_revision": event.compressor_revision,
+                        "attempted_model_calls": event.attempted_model_calls,
+                        "compression_calls": event.attempted_model_calls,
+                        "usage": _usage_data(event.usage),
+                        "request_id": event.request_id,
+                        "response_model": event.response_model,
+                        "cost_unknown": event.cost_unknown,
+                        "compression_error": event.error,
+                    },
+                    private_data={
+                        "context_compression": {
+                            "summary_key": event.summary_key,
+                            "source_hash": event.source_hash,
+                        }
+                    },
+                )
+
+            try:
+                projection = await within_deadline(
+                    self.context_governor.prepare(
+                        transcript,
+                        instructions=self.instructions,
+                        tool_specs=tool_specs,
+                        tool_policies={
+                            registered.name: registered.context_policy
+                            for registered in self.registry.tools
+                        },
+                        hard_limit=self.config.max_context_chars,
+                        compression_event_sink=record_compression_lifecycle,
+                    )
+                )
+            except TimeoutError:
+                await record(
+                    AgentJournalEventKind.BUDGET_EXHAUSTED,
+                    f"budget:s{step}:wall_time",
+                    step=step,
+                    public_data={
+                        "reason": "wall_time",
+                        "status": RunStatus.TIMED_OUT.value,
+                        "stop_reason": StopReason.WALL_TIME.value,
+                        "terminal_decision": True,
+                    },
+                    private_data={"transcript": transcript_to_json(transcript)},
+                )
+                await emit(EventKind.BUDGET_EXHAUSTED, step=step, data={"reason": "wall_time"})
+                final = result(RunStatus.TIMED_OUT, StopReason.WALL_TIME)
+                return await finish(final, step=step)
+
+            report = projection.report
+            model_calls += report.compression_calls
+            usage = usage + report.compression_usage
+            context_metrics["projections"] += 1
+            context_metrics["peak_input_chars"] = max(
+                context_metrics["peak_input_chars"], report.input_chars
             )
-            if context_chars > self.config.max_context_chars:
+            context_metrics["peak_projected_chars"] = max(
+                context_metrics["peak_projected_chars"], report.final_chars
+            )
+            context_metrics["deterministic_evictions"] += len(report.evictions)
+            context_metrics["deterministic_removed_chars"] += (
+                report.deterministic_removed_chars
+            )
+            context_metrics["compression_calls"] += report.compression_calls
+            context_metrics["compression_cache_hits"] += int(report.compression_cache_hit)
+            context_metrics["compression_source_chars"] += report.compression_source_chars
+            context_metrics["hard_fallbacks"] += int(report.hard_fallback)
+            context_metrics["hard_dropped_items"] += report.hard_dropped_items
+            eviction_reasons: dict[str, JsonValue] = {}
+            for eviction in report.evictions:
+                key = eviction.reason.value
+                current_count = eviction_reasons.get(key, 0)
+                eviction_reasons[key] = (
+                    current_count + 1 if isinstance(current_count, int) else 1
+                )
+            governance_changed = bool(
+                report.evictions
+                or report.summary_key
+                or report.hard_fallback
+                or report.overflow
+                or report.compression_error
+            )
+            if governance_changed:
+                context_public: dict[str, JsonValue] = {
+                    "strategy": report.strategy.value,
+                    "compression_phase": "projection_completed",
+                    "input_chars": report.input_chars,
+                    "deterministic_chars": report.deterministic_chars,
+                    "context_chars": report.final_chars,
+                    "evictions": len(report.evictions),
+                    "eviction_reasons": eviction_reasons,
+                    "deterministic_removed_chars": report.deterministic_removed_chars,
+                    "compression_calls": report.compression_calls,
+                    "compression_cache_hit": report.compression_cache_hit,
+                    "compression_source_chars": report.compression_source_chars,
+                    "hard_fallback": report.hard_fallback,
+                    "hard_dropped_items": report.hard_dropped_items,
+                    "overflow": report.overflow,
+                    "compression_error": report.compression_error,
+                    "compression_accounted_in_terminal": bool(report.summary_key),
+                    "request_id": report.compression_request_id,
+                    "response_model": report.compression_response_model,
+                    "usage": _usage_data(report.compression_usage),
+                }
+                await record(
+                    AgentJournalEventKind.CONTEXT_GOVERNED,
+                    f"context:s{step}:governed:{current_execution_id}",
+                    step=step,
+                    public_data=context_public,
+                    private_data={
+                        "context_projection": transcript_to_json(projection.transcript),
+                        **(
+                            {
+                                "context_compression": {
+                                    "summary_key": report.summary_key,
+                                }
+                            }
+                            if report.summary_key is not None
+                            else {}
+                        ),
+                    },
+                )
+                await emit(
+                    EventKind.CONTEXT_GOVERNED,
+                    step=step,
+                    data={
+                        "strategy": report.strategy.value,
+                        "input_chars": report.input_chars,
+                        "context_chars": report.final_chars,
+                        "evictions": len(report.evictions),
+                        "compression_calls": report.compression_calls,
+                        "hard_fallback": report.hard_fallback,
+                        "overflow": report.overflow,
+                    },
+                    stream_data=context_public,
+                )
+            context_chars = report.final_chars
+            if report.overflow:
                 await record(
                     AgentJournalEventKind.BUDGET_EXHAUSTED,
                     f"budget:s{step}:context_limit",
@@ -902,7 +1113,7 @@ class ReActAgent:
             forward_model_event = model_stream_forwarder(step)
 
             request = ModelRequest(
-                transcript=tuple(transcript),
+                transcript=projection.transcript,
                 tools=tool_specs,
                 instructions=self.instructions,
                 parallel_tool_calls=self.config.parallel_tool_calls,

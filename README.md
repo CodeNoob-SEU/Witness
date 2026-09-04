@@ -33,6 +33,8 @@ ReAct 循环，还提供一套可审计的执行底座：把已经提交的事�
 | 能力 | 状态 | 当前实现 |
 | --- | --- | --- |
 | ReAct Core | ✅ 已实现 | OpenAI Responses / Chat Completions、严格 tool schema、并发与预算限制 |
+| 分层上下文治理 | ✅ 已实现 | 确定性淘汰 → 持久化生成式压缩 → 硬预算兜底，canonical/active 双视图 |
+| Runtime Debugging | ✅ 已实现 | MCP → DAP → debugpy、断点/控制/栈/变量、零模型 PR Evidence |
 | 事件溯源 | ✅ 已实现 | 版本化事件、纯 reducer、upcaster、严格 sequence、前向 hash chain |
 | PostgreSQL Journal | ✅ 已实现 | PostgreSQL 16+、CAS、幂等 operation、租约、fencing、Session 单活 Run |
 | Session Resume | ✅ 已实现 | 新 execution 恢复、模型 abandoned、工具恢复策略、人工 reconciliation |
@@ -43,8 +45,10 @@ ReAct 循环，还提供一套可审计的执行底座：把已经提交的事�
 | 前端工作台 | ✅ 已实现 | Live、Timeline、Audit、Replay、Workspace Diff、Cost、History |
 | 跨主机搬迁 worktree | ◻️ 暂未覆盖 | 当前支持同机多进程或共享 Git 存储；跨主机工作区迁移留待后续阶段 |
 
-当前验证基线：`220 passed, 18 skipped`，另有 `18 passed` 的真实 PostgreSQL 集成测试；Ruff、
-Mypy 和 wheel 构建均通过，发布包内包含 `001–010` 数据库 migration。
+当前验证命令与最新评测工件见文末“开发验证”、
+[`docs/evaluations/context_ab_results.md`](docs/evaluations/context_ab_results.md) 和
+[`docs/evaluations/context_live_ab_results.md`](docs/evaluations/context_live_ab_results.md) 和
+[`docs/evaluations/debugging_demo_results.md`](docs/evaluations/debugging_demo_results.md)。
 
 ## 架构概览
 
@@ -106,6 +110,12 @@ uv sync --extra dev
 若不使用 uv，也可以执行 `python -m pip install -e .`。基础安装包含 OpenAI SDK、Pydantic、
 FastAPI/Uvicorn 和 PostgreSQL adapter；OpenTelemetry 仍是独立的 `otel` extra。
 
+Runtime Debugging 另需固定版本的 debugpy 与 MCP SDK：
+
+```bash
+uv sync --extra debug --extra dev
+```
+
 然后设置至少两个环境变量：
 
 ```bash
@@ -132,6 +142,8 @@ python examples/quickstart.py
 | `DATABASE_URL` | 否 | PostgreSQL DSN 的兼容 fallback。两个 DSN 都未设置时使用进程内 journal。 |
 | `REACT_AGENT_REPOSITORY` | 否，成对 | 要隔离操作的 non-bare Git worktree。必须与 `REACT_AGENT_WORKTREE_ROOT` 同时设置。 |
 | `REACT_AGENT_WORKTREE_ROOT` | 否，成对 | Session worktree 的独立 managed root；不能与 repository 互相包含。 |
+| `REACT_AGENT_CONTEXT_STRATEGY` | 否 | Web Runtime 的上下文策略：`tiered`（默认）、`generic` 或 `stop`。 |
+| `REACT_AGENT_CONTEXT_SUMMARY_DIR` | 生产建议 | 私有持久化 summary 目录；未设置时只使用进程内 cache，无法跨进程 Resume 复用。 |
 | `REACT_AGENT_WEB_HOST` | 否 | Web 监听地址，默认 `127.0.0.1`。 |
 | `REACT_AGENT_WEB_PORT` | 否 | Web 监听端口，默认 `8000`。 |
 | `OTEL_SERVICE_NAME` | 否 | OpenTelemetry service name。 |
@@ -260,7 +272,7 @@ async def approve(request: ApprovalRequest) -> bool:
 `AgentConfig` 的所有限制都作用于单次 `run()`：
 
 ```python
-from react_agent import AgentConfig
+from react_agent import AgentConfig, ContextStrategy
 
 config = AgentConfig(
     max_steps=8,
@@ -269,6 +281,9 @@ config = AgentConfig(
     max_concurrent_tools=8,
     max_tool_output_chars=20_000,
     max_context_chars=200_000,
+    context_strategy=ContextStrategy.TIERED,
+    context_keep_recent_turns=2,
+    context_summary_max_chars=12_000,
     parallel_tool_calls=True,
     repeated_action_limit=3,
 )
@@ -280,8 +295,8 @@ config = AgentConfig(
   不是对已启动同步线程或外部系统副作用的强制终止保证。
 - `max_concurrent_tools`：同一轮最多同时执行的工具数。
 - `max_tool_output_chars`：单个 observation 的最大字符数，超出时返回带元数据的安全预览。
-- `max_context_chars`：发送模型前的保守字符预算，包含 instructions、工具 schema 和完整
-  transcript；超限时明确停止，由应用压缩或总结旧历史后再继续。
+- `max_context_chars`：发送模型前的硬字符预算，包含 instructions、工具 schema 和 active
+  projection；三级治理无法安全满足预算时才以 `CONTEXT_LIMIT` 明确停止。
 - `parallel_tool_calls`：只有同一批工具都允许 `parallel_safe` 时才并发；结果仍按请求顺序写回。
 - `repeated_action_limit`：同一次 run 内相同工具与参数达到阈值时停止，即使结果含时间戳或
   随机值也能识别；同时也能识别
@@ -292,6 +307,89 @@ config = AgentConfig(
 
 预算耗尽、循环检测和总超时是正常终态，不会伪装成成功回答。检查 `result.status` 与 `result.stop_reason`，不要只判断 `result.output`。
 供应商的 `length`、`incomplete`、`content_filter` 和 refusal 也会映射为明确终态。
+
+## 分层上下文治理
+
+模型每轮看到的是有界的 active projection；`AgentResult`、Session transcript 和私有事件日志仍保留
+未改写的 canonical transcript。默认 `ContextStrategy.TIERED` 依次执行：
+
+1. **确定性淘汰（零模型调用）**：扫描由 Agent events 重放出的 canonical transcript，只按工具作者
+   声明的 `ToolContextPolicy` 淘汰被成功修改、重读、重跑或成功重试明确替代的旧 observation；
+   未声明的工具默认 `OPAQUE`，fail closed 保留。
+2. **生成式压缩**：仍超预算时才压缩较老前缀；summary key 覆盖源 transcript、算法、prompt、
+   compressor/model revision 与长度限制，完成结果可复用，started/completed/failed/abandoned 均入日志。
+3. **硬预算兜底**：压缩失败、超长或存储损坏时机械缩短完整旧 block；连当前目标与固定 schema 都
+   无法容纳时显式返回 `CONTEXT_LIMIT`，不会静默截断当前目标。
+
+工具语义需要显式声明；例如文件读取可以按 `path` 识别同一资源：
+
+```python
+from react_agent import ObservationEffect, ToolContextPolicy, tool
+
+
+@tool(context_policy=ToolContextPolicy(ObservationEffect.READ, ("path",)))
+def read_file(path: str) -> str:
+    """读取工作区文本文件。"""
+    ...
+```
+
+跨进程复用生成式 summary 时，应把 `ContextGovernor` 配置为私有的
+`FileContextSummaryStore`（目录和文件分别以 `0700/0600` 创建），或提供等价的持久化 adapter；
+默认内存 store 只适合单进程。Runtime Resume 会在重试前把孤立的 compression `started` 确定性
+收口为 `abandoned`，已写入的内容寻址 summary 仍可直接复用。
+
+五臂离线 A/B（Raw、recency masking、generic summary、deterministic-only、tiered）可复跑：
+
+```bash
+uv run python benchmarks/context_ab.py --output-dir docs/evaluations
+```
+
+在 8,000 字符的 provider-neutral 序列化 envelope 预算下，七类合成轨迹中 replacement-heavy
+场景的 tiered 相对 generic summary
+减少 **80.0% compressor 调用**、平均节省 **70.5% 字符**；5 个同场景配对的
+tiered/generic 调用比 bootstrap 95% CI 为 **[0.000, 0.600]**。4 个仅靠 Tier 1 已能满足预算的场景
+全部保持零 compressor 调用；edit/read churn 在完整序列化 envelope 下仍超限，因此按设计回落到 Tier 2。
+append-only / unrelated 场景的 tiered/generic 投影字符比为 `1.000`。相对简单 recency masking，
+replacement-heavy 与 non-redundant 的活事实召回分别提升 **27.1** 和 **90.8** 个百分点。
+
+另一个 repository-like scripted 双臂验收在两个独立临时 workspace 中实际执行 read/write/test 工具：
+高预算 Raw 与 8,000 字符 Tiered 都得到 `VALUE=42; TESTS=PASS`，必要有状态工具轨迹和最终 workspace
+SHA-256 完全相同；Tiered 的峰值 active context 从 `23,782` 降至 `7,799`（**-67.2%**），且无
+hard fallback。完整逐场景结果、验收项与边界见
+[`docs/evaluations/context_ab_results.md`](docs/evaluations/context_ab_results.md)。合成 summary 臂和 scripted
+状态机均为可复现离线测评，不等同于真实模型仓库任务 solve-rate。
+
+### 外部模型配对 trace-QA（2026-08-21）
+
+固定种子随机化臂顺序的 20 对 repository-derived 长轨迹 trace-QA（16 对 replacement-heavy、
+4 对 append-only）也通过第三方 OpenAI-compatible Chat Completions endpoint 请求了
+`gpt-5.6-terra`。Generic / Tiered 的 exact accuracy 为 **5.0% / 70.0%**，必要事实召回为
+**28.75% / 77.50%**；Tiered 相对 Generic 分别提升 **65.0** 和 **48.75** 个百分点。两臂
+40 次分配运行均完成，失败仍按预注册规则留在分母中。
+
+资源侧，Tiered 将 compressor 调用从 **20 降至 8**（-12，**-60.0%**），compression tokens
+从 **191,217 降至 64,565**（-126,652，**-66.2%**），每次运行平均墙钟时间从
+**20,732.9 ms 降至 9,298.1 ms**（-11,434.8 ms，**-55.2%**）。同时 main tokens 从
+32,768 增至 55,687（+22,919，+69.9%）；compression + main 总 tokens 仍从 223,985 降至
+120,252（-103,733，-46.3%）。replacement-heavy 的 tiered/generic compressor-call ratio
+paired bootstrap 95% CI 为 **[0.0625, 0.5000]**；append-only ratio 为 **[1.0, 1.0]**。
+
+场景边界同样重要：Tier 1 在 reread（8/8）和 retry（4/4）上无需模型压缩即可让 Tiered 全部
+exact，收益集中在旧 observation 被明确替代的轨迹；`edit_reread` 仍然超预算，Tiered 的 4/4
+运行都按设计回落到生成式压缩，exact 为 2/4；append-only 没有可安全淘汰的旧状态，两臂均为
+4 次压缩、0/4 exact、25% 召回，因此没有治理收益。
+
+预注册验收并未全部通过：`both_arms_exact_accuracy_at_least_80_percent` 明确为 **FAIL**
+（Generic 5%，Tiered 70%），总计 **7/8 gates passed**，不能把本次结果表述为全量验收通过。
+此外，`gpt-5.6-terra` 是第三方服务报告的 **unpinned provider alias**，请求名与响应名相同也不
+证明底层模型身份或 revision；seed `20260820` 确定了本地臂顺序和 bootstrap，但把同一个 seed
+随请求发送给 endpoint **并不保证第三方推理确定性**。本测评是轨迹必要事实恢复 trace-QA，
+**不是仓库任务 solve-rate**。
+该 endpoint 返回的部分 completion usage 还高于请求中的 `max_output_tokens=1200`；runner 原样
+归档 provider usage，因此不把该字段解读为已验证的服务端硬上限。
+完整 provenance、逐运行证据和未改名的验收项见
+[`context_live_ab_results.md`](docs/evaluations/context_live_ab_results.md)；机器可读结果见
+[`context_live_ab_results.json`](docs/evaluations/context_live_ab_results.json)。
 
 ## 事件与结果
 
@@ -420,16 +518,85 @@ react-agent --api-mode chat_completions --compat "你好"
 
 `--compat` 会省略 `strict`、`parallel_tool_calls` 和 `store` 等可选 provider 字段。
 
+## Runtime Debugging 与 PR Evidence
+
+调试实现共享一个有状态核心：Agent tool 与官方 MCP v2 stdio facade 都调用同一
+`PythonRuntimeDebugger`，后者通过 DAP 驱动固定版本的 debugpy。公开的 7 个严格工具是：
+
+- `python_debug_launch`、`python_debug_set_breakpoints`；
+- `python_debug_control`（continue/next/step in/step out/pause）；
+- `python_debug_stack`、`python_debug_select_frame`、`python_debug_variables`；
+- `python_debug_stop`。
+
+它只允许在可信 workspace 内 launch Python 文件；使用 stdio，不开放调试 TCP/PID attach，也不提供
+`evaluate`。`stop_id` 和 frame selection 都绑定当前暂停代次，旧帧引用会结构化拒绝。栈同时保留
+DAP 原始顶帧作为 observed failure，并用稳定的 workspace/user-frame 规则推荐可疑帧。变量有数量、
+字符与总 observation 字节上限，常见 secret 名称、赋值和值在写入日志前脱敏。
+
+启动 MCP server（event log 路径必须是新的私有文件）：
+
+```bash
+uv run --extra debug react-agent-debug-mcp \
+  --workspace "$PWD" \
+  --allow-execution \
+  --event-log "$PWD/.private-debug-events.json"
+```
+
+`--allow-execution` 是显式执行开关；launch/control/set-breakpoints/stop 仍应由 MCP host 设置人工审批。
+该 server 会实际运行 workspace 中的 Python 代码，只能用于可信仓库。event log 含脱敏后的局部变量、
+参数和复现命令，不能放入 public log 或提交版本库。Agent 内嵌模式使用
+`create_python_debug_tools(debugger)`；状态变更工具默认 `requires_approval=True`，且 session 通过
+`run_id + execution_id` fencing，在正常结束、取消和 Runtime close 时统一回收。
+
+真实轻量 Golden Demo 会经由完整的 `MCP stdio → DAP → debugpy` 链路设置断点、继续到异常、选择
+可疑帧、抓取 locals、终止进程，并从事件日志纯回放 PR Evidence：
+
+```bash
+uv run --extra debug python examples/runtime_debug_demo/run_demo.py \
+  --workspace "$PWD" \
+  --output-dir docs/evaluations
+```
+
+最终验收为 **13/13 PASS**：7 个 schema 与 Agent tool 一致；断点 42 生效；捕获
+`ZeroDivisionError` 及 `item_count=0`、`billable_items=[]`、`subtotal=99.0`；23 个 durable events；
+五次 JSON/Markdown 回放逐字节一致；报告生成 `model_calls=0`、回放 `debugger_calls=0`；结束后
+orphan process 为 0。结果见
+[`docs/evaluations/debugging_demo_results.md`](docs/evaluations/debugging_demo_results.md)，固定证据见
+[`docs/evaluations/debugging_pr_evidence.md`](docs/evaluations/debugging_pr_evidence.md)。事件链与 observation
+digest 只能检测 sequence/hash/digest 内部不一致；它们是无密钥 SHA-256，不认证来源，也不抵御有权
+重写完整日志并重算整链的主体。生产真实性需要可信外部 head、HMAC/签名或等价锚定。
+
+Golden 工件只声称它实际走过的路径；补充测试另行覆盖 `next/step_in/step_out`、
+Arguments scope、值截断与 observation 总字节 fail-closed，以及真实 debugpy 进程在 cancel 和
+debugger close 后的回收。Runtime 测试还会删除 snapshot、从 sequence 1 重建，校验 active
+projection 逐字节一致且持久化 summary 零额外 compressor/tool 调用复用。
+`model_calls=0` / `debugger_calls=0` 是 evidence generator 只接收已封存 events、不持有这两类
+dependency 的构造不变量，不是供应商计费遥测。
+
+### Project-level Crash-to-Proof PR Demo
+
+项目级 P0 Demo 已把 `AgentRuntime` 的 worktree 恢复与独立的 `ProjectPullRequests` 状态机串成一条
+本地纵切：第一次在幂等代码工具产生半成品后接管，第二次在 MockForge 已创建 Check Run、publisher
+尚未持久化 receipt 时接管。恢复路径先进入 `UNKNOWN` 并精确 observe/adopt，因此受控成功路径只有
+一次 outbound create 和一个物理 Check Run。运行方式、7 个输出工件、4–5 分钟面试讲法与生产边界见
+[`examples/project_pr_demo/README.md`](examples/project_pr_demo/README.md)。该 Demo 使用内存 PR store 与
+MockForge，不代表真实 GitHub/PostgreSQL Adapter 已完成。
+
 ## Durable Runtime
 
 `ReActAgent` 负责一次确定的模型/工具循环；`AgentRuntime` 在其外层提供可恢复执行、Session
 提交、事件跟随、成本记录、遥测和可选工作区检查点。每个 Run 都是一条 append-only 事实链：
 
-- durable event 使用严格递增的 `sequence`，并通过前向 hash 链校验缺失、乱序或篡改；
+- durable event 使用严格递增的 `sequence`，并通过前向 hash 链检测缺失、乱序，
+  或内容变更后 hash 未同步重算造成的内部不一致；
 - append 与 Session commit 使用 compare-and-swap，避免多 worker 静默覆盖状态；
 - Start/Fork 接受幂等键，相同请求只会保留一个 Run；
 - 执行权由带 fencing token 的租约保护，过期 worker 无法继续提交事实；
 - Replay 只从事件折叠状态，恢复逻辑不会从日志文本猜测下一步。
+
+这里的 hash chain 是无密钥 SHA-256 内部一致性校验，不是来源认证或抗恶意改写证明。没有可信的
+外部 head、HMAC 或数字签名时，能够改写整条日志的主体也能重算后续 hash；生产安全边界仍依赖
+PostgreSQL 权限、append-only trigger、fencing 与外部备份/锚定策略。
 
 生产环境应把 PostgreSQL journal 作为唯一 source of truth。PostgreSQL 的 `LISTEN/NOTIFY`
 只负责低延迟唤醒 follower，不承载事实；消费者始终按 `sequence` 查询表，并有轮询兜底，因此
@@ -550,6 +717,7 @@ Runtime SSE 明确区分两类事件：
 | 中断状态 | Resume 行为 |
 | --- | --- |
 | 模型调用已开始但未提交完成 | 写入 `model_abandoned`，将该次成本记为未知，再发起新的模型 attempt。 |
+| 压缩已开始但无 terminal fact | 写入 compression `abandoned`；若内容寻址 summary 已落盘则复用，否则再压缩。 |
 | 工具已计划但尚未执行 | 从 durable tool plan 继续。 |
 | 幂等工具执行中断 | 使用稳定 idempotency key 自动重试。 |
 | 工具已完成或已有复用事实 | 使用 durable `ToolMessage`，不重复执行 provider。 |
@@ -668,15 +836,15 @@ provider 原始事件或凭据；Replay 完全抑制 telemetry。Web 默认把�
 ## 开发验证
 
 ```bash
-uv run ruff check .
-uv run mypy src/react_agent examples/quickstart.py
-uv run pytest -q
+uv run --extra debug --extra dev ruff check .
+uv run --extra debug --extra dev mypy src/react_agent examples/quickstart.py
+uv run --extra debug --extra dev pytest -q
 uv build
 ```
 
 默认测试不访问网络：Agent 循环使用 deterministic fake model，协议测试使用真实 OpenAI
-SDK 加 `httpx.MockTransport`。真实 endpoint 应通过 quickstart 或 CLI 单独验证，避免把 live
-API 调用放进默认 CI。
+SDK 加 `httpx.MockTransport`；debug Golden 只启动本机 stdio debugpy 和受控 Demo，不访问网络。
+真实模型 endpoint 或重型仓库 benchmark 应单独运行，避免放进默认 CI。
 
 ## OpenAI Docs
 

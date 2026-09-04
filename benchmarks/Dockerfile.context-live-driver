@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=witness-context-live-base:python312
+FROM ${BASE_IMAGE}
+
+WORKDIR /workspace
+COPY README.md pyproject.toml uv.lock /workspace/
+COPY src /workspace/src
+COPY migrations /workspace/migrations
+COPY benchmarks /workspace/benchmarks
+COPY tests /workspace/tests
+
+USER root
+RUN /usr/bin/python3 -m venv /witness-venv \
+    && /witness-venv/bin/pip install --no-cache-dir --retries 8 --timeout 120 /workspace
+USER 1000:1000
+
+ENTRYPOINT ["/witness-venv/bin/python", "/workspace/benchmarks/context_live_ab.py"]

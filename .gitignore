@@ -10,3 +10,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+.private-debug-events*.json
+.DS_Store
+output/
