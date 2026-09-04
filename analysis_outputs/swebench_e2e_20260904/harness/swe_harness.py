@@ -5,6 +5,7 @@ Subcommands (all read config from environment; see run.sh):
   start     --instance instance.json --session S --key K   -> prints run_id, blocks until terminal
   status    --run-id R                                     -> read-only snapshot summary (separate process)
   resume    --run-id R                                     -> new process takes over after a crash
+  supervise [--run-id R]                                   -> RunSupervisor finds and resumes orphans itself
   report    --run-id R --out DIR                           -> journal integrity, replay, cost, patch export
   evaluate  --run-id R --out DIR                           -> SWE-bench FAIL_TO_PASS / PASS_TO_PASS check
 
@@ -49,6 +50,7 @@ from react_agent.runtime import (
     RuntimeConflict,
     StartRun,
 )
+from react_agent.supervisor import RunSupervisor
 from react_agent.workspace import GitWorktreeWorkspace
 
 ROOT = Path(os.environ["WITNESS_SWE_ROOT"]).resolve()
@@ -71,7 +73,9 @@ suite. Rules:
 - Only modify source files under src/. Do NOT edit or add tests; hidden tests will judge you.
 - Use edit_file for targeted changes; use write_file only for new files.
 - Run the relevant existing tests with run_tests before and after your change.
-- Use run_command only for read-only exploration; it is not retried automatically after a crash.
+- Use run_command only for exploration. Pass read_only=true for commands that change nothing
+  (git status, ls, grep, python -c "import ..."): those are retried automatically after a crash;
+  any other command needs an operator if the process dies while it runs.
 - When done, reply with a short summary of the root cause and the change you made.
 """
 
@@ -81,7 +85,9 @@ CONFIG = AgentConfig(
     max_wall_time_s=3600.0,
     max_concurrent_tools=4,
     max_tool_output_chars=30_000,
-    max_context_chars=400_000,
+    # WITNESS_MAX_CONTEXT_CHARS=60000 forces Tier 2 generative compression
+    # on the same instance (handoff §6.4); the default never triggered it.
+    max_context_chars=int(os.environ.get("WITNESS_MAX_CONTEXT_CHARS", "400000")),
     context_strategy=ContextStrategy.TIERED,
     context_keep_recent_turns=3,
     context_summary_max_chars=12_000,
@@ -327,6 +333,38 @@ async def cmd_resume(args) -> int:
     return 0
 
 
+async def cmd_supervise(args) -> int:
+    """Worker B as a supervisor: it is never told which run died."""
+
+    model = build_model()
+    async with PostgresRunJournal(DSN) as journal:
+        runtime = build_runtime(build_agent(model), journal)
+        log(f"agent_revision={runtime.agent_revision} manifest={runtime.agent.tool_manifest_hash}")
+        supervisor = RunSupervisor(runtime, interval_s=5.0, max_executions_per_run=8)
+        deadline = time.monotonic() + LEASE_TTL_S * 4
+        resumed_run: str | None = None
+        while time.monotonic() < deadline:
+            sweep = await supervisor.sweep()
+            for item in sweep.runs:
+                log(f"supervisor: run={item.run_id} outcome={item.outcome} executions={item.executions} detail={item.detail}")
+            hits = [item for item in sweep.runs if item.outcome == "resumed"
+                    and (args.run_id is None or item.run_id == args.run_id)]
+            if hits:
+                resumed_run = hits[0].run_id
+                break
+            await asyncio.sleep(supervisor.interval_s)
+        if resumed_run is None:
+            log("supervisor found nothing to resume before the deadline")
+            await runtime.close()
+            await model.aclose()
+            return 5
+        snapshot = await wait_terminal(runtime, resumed_run, CONFIG.max_wall_time_s + 300)
+        print_snapshot(snapshot)
+        await runtime.close()
+    await model.aclose()
+    return 0
+
+
 def _git(cwd: Path, *argv: str) -> str:
     return subprocess.run(["git", *argv], cwd=cwd, capture_output=True, text=True, check=True).stdout
 
@@ -472,10 +510,11 @@ def main() -> int:
     s = sub.add_parser("start"); s.add_argument("--instance", required=True); s.add_argument("--session", required=True); s.add_argument("--key", required=True); s.add_argument("--run-id-file", default=str(ROOT / "current_run_id"))
     s = sub.add_parser("status"); s.add_argument("--run-id", required=True)
     s = sub.add_parser("resume"); s.add_argument("--run-id", required=True); s.add_argument("--auto-resolve", action="store_true")
+    s = sub.add_parser("supervise"); s.add_argument("--run-id", default=None)
     s = sub.add_parser("report"); s.add_argument("--run-id", required=True); s.add_argument("--out", required=True)
     s = sub.add_parser("evaluate"); s.add_argument("--run-id", required=True); s.add_argument("--instance", required=True); s.add_argument("--out", required=True)
     args = parser.parse_args()
-    fn = {"start": cmd_start, "status": cmd_status, "resume": cmd_resume, "report": cmd_report, "evaluate": cmd_evaluate}[args.cmd]
+    fn = {"start": cmd_start, "status": cmd_status, "resume": cmd_resume, "supervise": cmd_supervise, "report": cmd_report, "evaluate": cmd_evaluate}[args.cmd]
     return asyncio.run(fn(args))
 
 
