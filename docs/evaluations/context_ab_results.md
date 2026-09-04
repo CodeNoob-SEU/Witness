@@ -6,46 +6,46 @@ Provider-neutral serialized-envelope hard character budget: `8000`.
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |
 | same_file_rereads | replacement_heavy | raw_hard_stop | 32623 | 32623 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | same_file_rereads | replacement_heavy | recency_observation_masking | 32623 | 7377 | 77.4% | 0 | 0 | 11 | False | False | 1.00 |
-| same_file_rereads | replacement_heavy | generic_summary | 32623 | 6046 | 81.5% | 1 | 0 | 0 | False | False | 1.00 |
+| same_file_rereads | replacement_heavy | generic_summary | 32623 | 6164 | 81.1% | 1 | 0 | 0 | False | False | 1.00 |
 | same_file_rereads | replacement_heavy | deterministic_only | 32623 | 7885 | 75.8% | 0 | 11 | 0 | False | False | 1.00 |
 | same_file_rereads | replacement_heavy | tiered | 32623 | 7885 | 75.8% | 0 | 11 | 0 | False | False | 1.00 |
 | edit_read_churn | replacement_heavy | raw_hard_stop | 22592 | 22592 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | edit_read_churn | replacement_heavy | recency_observation_masking | 22592 | 7964 | 64.7% | 0 | 0 | 12 | False | False | 0.14 |
-| edit_read_churn | replacement_heavy | generic_summary | 22592 | 3977 | 82.4% | 1 | 0 | 0 | False | False | 1.00 |
-| edit_read_churn | replacement_heavy | deterministic_only | 22592 | 6644 | 70.6% | 0 | 6 | 0 | True | False | 0.14 |
-| edit_read_churn | replacement_heavy | tiered | 22592 | 3875 | 82.8% | 1 | 6 | 0 | False | False | 1.00 |
+| edit_read_churn | replacement_heavy | generic_summary | 22592 | 4141 | 81.7% | 1 | 0 | 0 | False | False | 1.00 |
+| edit_read_churn | replacement_heavy | deterministic_only | 22592 | 3961 | 82.5% | 0 | 6 | 0 | False | False | 0.29 |
+| edit_read_churn | replacement_heavy | tiered | 22592 | 4039 | 82.1% | 1 | 6 | 0 | False | False | 1.00 |
 | test_reruns | replacement_heavy | raw_hard_stop | 27426 | 27426 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | test_reruns | replacement_heavy | recency_observation_masking | 27426 | 6699 | 75.6% | 0 | 0 | 9 | False | False | 1.00 |
-| test_reruns | replacement_heavy | generic_summary | 27426 | 6113 | 77.7% | 1 | 0 | 0 | False | False | 1.00 |
+| test_reruns | replacement_heavy | generic_summary | 27426 | 6252 | 77.2% | 1 | 0 | 0 | False | False | 1.00 |
 | test_reruns | replacement_heavy | deterministic_only | 27426 | 7113 | 74.1% | 0 | 9 | 0 | False | False | 1.00 |
 | test_reruns | replacement_heavy | tiered | 27426 | 7113 | 74.1% | 0 | 9 | 0 | False | False | 1.00 |
 | successful_retry | replacement_heavy | raw_hard_stop | 22140 | 22140 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | successful_retry | replacement_heavy | recency_observation_masking | 22140 | 6005 | 72.9% | 0 | 0 | 7 | False | False | 1.00 |
-| successful_retry | replacement_heavy | generic_summary | 22140 | 6108 | 72.4% | 1 | 0 | 0 | False | False | 1.00 |
+| successful_retry | replacement_heavy | generic_summary | 22140 | 6249 | 71.8% | 1 | 0 | 0 | False | False | 1.00 |
 | successful_retry | replacement_heavy | deterministic_only | 22140 | 6404 | 71.1% | 0 | 7 | 0 | False | False | 1.00 |
 | successful_retry | replacement_heavy | tiered | 22140 | 6404 | 71.1% | 0 | 7 | 0 | False | False | 1.00 |
 | success_then_failed_rerun | replacement_heavy | raw_hard_stop | 14042 | 14042 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | success_then_failed_rerun | replacement_heavy | recency_observation_masking | 14042 | 7113 | 49.3% | 0 | 0 | 3 | False | False | 0.50 |
-| success_then_failed_rerun | replacement_heavy | generic_summary | 14042 | 6068 | 56.8% | 1 | 0 | 0 | False | False | 1.00 |
+| success_then_failed_rerun | replacement_heavy | generic_summary | 14042 | 6244 | 55.5% | 1 | 0 | 0 | False | False | 1.00 |
 | success_then_failed_rerun | replacement_heavy | deterministic_only | 14042 | 7238 | 48.5% | 0 | 3 | 0 | False | False | 1.00 |
 | success_then_failed_rerun | replacement_heavy | tiered | 14042 | 7238 | 48.5% | 0 | 3 | 0 | False | False | 1.00 |
 | unrelated_reads | non_redundant | raw_hard_stop | 32768 | 32768 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | unrelated_reads | non_redundant | recency_observation_masking | 32768 | 7478 | 77.2% | 0 | 0 | 11 | False | False | 0.08 |
-| unrelated_reads | non_redundant | generic_summary | 32768 | 6110 | 81.4% | 1 | 0 | 0 | False | False | 1.00 |
-| unrelated_reads | non_redundant | deterministic_only | 32768 | 6355 | 80.6% | 0 | 0 | 0 | True | False | 0.08 |
-| unrelated_reads | non_redundant | tiered | 32768 | 6110 | 81.4% | 1 | 0 | 0 | False | False | 1.00 |
+| unrelated_reads | non_redundant | generic_summary | 32768 | 6483 | 80.2% | 1 | 0 | 0 | False | False | 1.00 |
+| unrelated_reads | non_redundant | deterministic_only | 32768 | 6320 | 80.7% | 0 | 0 | 0 | False | False | 0.17 |
+| unrelated_reads | non_redundant | tiered | 32768 | 6483 | 80.2% | 1 | 0 | 0 | False | False | 1.00 |
 | opaque_append_only | non_redundant | raw_hard_stop | 27322 | 27322 | 0.0% | 0 | 0 | 0 | False | True | 1.00 |
 | opaque_append_only | non_redundant | recency_observation_masking | 27322 | 6640 | 75.7% | 0 | 0 | 9 | False | False | 0.10 |
-| opaque_append_only | non_redundant | generic_summary | 27322 | 6052 | 77.8% | 1 | 0 | 0 | False | False | 1.00 |
-| opaque_append_only | non_redundant | deterministic_only | 27322 | 5812 | 78.7% | 0 | 0 | 0 | True | False | 0.10 |
-| opaque_append_only | non_redundant | tiered | 27322 | 6052 | 77.8% | 1 | 0 | 0 | False | False | 1.00 |
+| opaque_append_only | non_redundant | generic_summary | 27322 | 6180 | 77.4% | 1 | 0 | 0 | False | False | 1.00 |
+| opaque_append_only | non_redundant | deterministic_only | 27322 | 6057 | 77.8% | 0 | 0 | 0 | False | False | 0.20 |
+| opaque_append_only | non_redundant | tiered | 27322 | 6180 | 77.4% | 1 | 0 | 0 | False | False | 1.00 |
 
 ## Aggregate
 
 - Replacement-heavy compressor-call reduction vs generic: **80.0%**.
 - Tier-1-fit replacement scenarios with strict zero Tiered compressor calls: **same_file_rereads, success_then_failed_rerun, successful_retry, test_reruns**.
 - Replacement-heavy paired bootstrap tiered/generic call-ratio 95% CI: **[0.000, 0.600]** (`n=5` synthetic scenario pairs, `10000` replicates).
-- Replacement-heavy tiered mean character saving: **70.5%**.
+- Replacement-heavy tiered mean character saving: **70.3%**.
 - Non-redundant tiered/generic projected-character ratio: **1.000**.
 - Replacement-heavy tiered recall gain vs recency masking: **27.1 points**.
 - Non-redundant tiered recall gain vs recency masking: **90.8 points**.

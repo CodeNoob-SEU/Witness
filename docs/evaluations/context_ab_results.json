@@ -26,7 +26,7 @@
       0.6
     ],
     "replacement_compressor_call_reduction_percent": 80.0,
-    "replacement_tiered_mean_saved_percent": 70.455,
+    "replacement_tiered_mean_saved_percent": 70.309,
     "replacement_tiered_minus_recency_recall_points": 27.142
   },
   "all_acceptance_passed": true,
@@ -50,7 +50,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "same_file_rereads",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -67,7 +68,8 @@
       "saved_chars": 25246,
       "saved_percent": 77.387,
       "scenario": "same_file_rereads",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -79,12 +81,13 @@
       "input_chars": 32623,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6046,
+      "projected_chars": 6164,
       "recency_masks": 0,
-      "saved_chars": 26577,
-      "saved_percent": 81.467,
+      "saved_chars": 26459,
+      "saved_percent": 81.105,
       "scenario": "same_file_rereads",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -101,7 +104,8 @@
       "saved_chars": 24738,
       "saved_percent": 75.83,
       "scenario": "same_file_rereads",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -118,7 +122,8 @@
       "saved_chars": 24738,
       "saved_percent": 75.83,
       "scenario": "same_file_rereads",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -135,7 +140,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "edit_read_churn",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -152,7 +158,8 @@
       "saved_chars": 14628,
       "saved_percent": 64.749,
       "scenario": "edit_read_churn",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -164,12 +171,13 @@
       "input_chars": 22592,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 3977,
+      "projected_chars": 4141,
       "recency_masks": 0,
-      "saved_chars": 18615,
-      "saved_percent": 82.396,
+      "saved_chars": 18451,
+      "saved_percent": 81.671,
       "scenario": "edit_read_churn",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -177,16 +185,17 @@
       "compression_source_chars": 0,
       "deterministic_evictions": 6,
       "deterministic_removed_chars": 13602,
-      "hard_fallback": true,
+      "hard_fallback": false,
       "input_chars": 22592,
-      "live_fact_recall": 0.1429,
+      "live_fact_recall": 0.2857,
       "overflow": false,
-      "projected_chars": 6644,
+      "projected_chars": 3961,
       "recency_masks": 0,
-      "saved_chars": 15948,
-      "saved_percent": 70.591,
+      "saved_chars": 18631,
+      "saved_percent": 82.467,
       "scenario": "edit_read_churn",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -198,12 +207,13 @@
       "input_chars": 22592,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 3875,
+      "projected_chars": 4039,
       "recency_masks": 0,
-      "saved_chars": 18717,
-      "saved_percent": 82.848,
+      "saved_chars": 18553,
+      "saved_percent": 82.122,
       "scenario": "edit_read_churn",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -220,7 +230,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "test_reruns",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -237,7 +248,8 @@
       "saved_chars": 20727,
       "saved_percent": 75.574,
       "scenario": "test_reruns",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -249,12 +261,13 @@
       "input_chars": 27426,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6113,
+      "projected_chars": 6252,
       "recency_masks": 0,
-      "saved_chars": 21313,
-      "saved_percent": 77.711,
+      "saved_chars": 21174,
+      "saved_percent": 77.204,
       "scenario": "test_reruns",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -271,7 +284,8 @@
       "saved_chars": 20313,
       "saved_percent": 74.065,
       "scenario": "test_reruns",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -288,7 +302,8 @@
       "saved_chars": 20313,
       "saved_percent": 74.065,
       "scenario": "test_reruns",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -305,7 +320,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "successful_retry",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -322,7 +338,8 @@
       "saved_chars": 16135,
       "saved_percent": 72.877,
       "scenario": "successful_retry",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -334,12 +351,13 @@
       "input_chars": 22140,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6108,
+      "projected_chars": 6249,
       "recency_masks": 0,
-      "saved_chars": 16032,
-      "saved_percent": 72.412,
+      "saved_chars": 15891,
+      "saved_percent": 71.775,
       "scenario": "successful_retry",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -356,7 +374,8 @@
       "saved_chars": 15736,
       "saved_percent": 71.075,
       "scenario": "successful_retry",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -373,7 +392,8 @@
       "saved_chars": 15736,
       "saved_percent": 71.075,
       "scenario": "successful_retry",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -390,7 +410,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "success_then_failed_rerun",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -407,7 +428,8 @@
       "saved_chars": 6929,
       "saved_percent": 49.345,
       "scenario": "success_then_failed_rerun",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -419,12 +441,13 @@
       "input_chars": 14042,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6068,
+      "projected_chars": 6244,
       "recency_masks": 0,
-      "saved_chars": 7974,
-      "saved_percent": 56.787,
+      "saved_chars": 7798,
+      "saved_percent": 55.533,
       "scenario": "success_then_failed_rerun",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "replacement_heavy",
@@ -441,7 +464,8 @@
       "saved_chars": 6804,
       "saved_percent": 48.455,
       "scenario": "success_then_failed_rerun",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": true
     },
     {
       "category": "replacement_heavy",
@@ -458,7 +482,8 @@
       "saved_chars": 6804,
       "saved_percent": 48.455,
       "scenario": "success_then_failed_rerun",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": true
     },
     {
       "category": "non_redundant",
@@ -475,7 +500,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "unrelated_reads",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -492,7 +518,8 @@
       "saved_chars": 25290,
       "saved_percent": 77.179,
       "scenario": "unrelated_reads",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "non_redundant",
@@ -504,12 +531,13 @@
       "input_chars": 32768,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6110,
+      "projected_chars": 6483,
       "recency_masks": 0,
-      "saved_chars": 26658,
-      "saved_percent": 81.354,
+      "saved_chars": 26285,
+      "saved_percent": 80.215,
       "scenario": "unrelated_reads",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -517,16 +545,17 @@
       "compression_source_chars": 0,
       "deterministic_evictions": 0,
       "deterministic_removed_chars": 0,
-      "hard_fallback": true,
+      "hard_fallback": false,
       "input_chars": 32768,
-      "live_fact_recall": 0.0833,
+      "live_fact_recall": 0.1667,
       "overflow": false,
-      "projected_chars": 6355,
+      "projected_chars": 6320,
       "recency_masks": 0,
-      "saved_chars": 26413,
-      "saved_percent": 80.606,
+      "saved_chars": 26448,
+      "saved_percent": 80.713,
       "scenario": "unrelated_reads",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -538,12 +567,13 @@
       "input_chars": 32768,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6110,
+      "projected_chars": 6483,
       "recency_masks": 0,
-      "saved_chars": 26658,
-      "saved_percent": 81.354,
+      "saved_chars": 26285,
+      "saved_percent": 80.215,
       "scenario": "unrelated_reads",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -560,7 +590,8 @@
       "saved_chars": 0,
       "saved_percent": 0.0,
       "scenario": "opaque_append_only",
-      "strategy": "raw_hard_stop"
+      "strategy": "raw_hard_stop",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -577,7 +608,8 @@
       "saved_chars": 20682,
       "saved_percent": 75.697,
       "scenario": "opaque_append_only",
-      "strategy": "recency_observation_masking"
+      "strategy": "recency_observation_masking",
+      "tier1_fit": true
     },
     {
       "category": "non_redundant",
@@ -589,12 +621,13 @@
       "input_chars": 27322,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6052,
+      "projected_chars": 6180,
       "recency_masks": 0,
-      "saved_chars": 21270,
-      "saved_percent": 77.849,
+      "saved_chars": 21142,
+      "saved_percent": 77.381,
       "scenario": "opaque_append_only",
-      "strategy": "generic_summary"
+      "strategy": "generic_summary",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -602,16 +635,17 @@
       "compression_source_chars": 0,
       "deterministic_evictions": 0,
       "deterministic_removed_chars": 0,
-      "hard_fallback": true,
+      "hard_fallback": false,
       "input_chars": 27322,
-      "live_fact_recall": 0.1,
+      "live_fact_recall": 0.2,
       "overflow": false,
-      "projected_chars": 5812,
+      "projected_chars": 6057,
       "recency_masks": 0,
-      "saved_chars": 21510,
-      "saved_percent": 78.728,
+      "saved_chars": 21265,
+      "saved_percent": 77.831,
       "scenario": "opaque_append_only",
-      "strategy": "deterministic_only"
+      "strategy": "deterministic_only",
+      "tier1_fit": false
     },
     {
       "category": "non_redundant",
@@ -623,12 +657,13 @@
       "input_chars": 27322,
       "live_fact_recall": 1.0,
       "overflow": false,
-      "projected_chars": 6052,
+      "projected_chars": 6180,
       "recency_masks": 0,
-      "saved_chars": 21270,
-      "saved_percent": 77.849,
+      "saved_chars": 21142,
+      "saved_percent": 77.381,
       "scenario": "opaque_append_only",
-      "strategy": "tiered"
+      "strategy": "tiered",
+      "tier1_fit": false
     }
   ],
   "schema_version": 5,
@@ -780,7 +815,7 @@
             6853,
             4217,
             7799,
-            5015
+            5265
           ]
         },
         "final_answer": "VALUE=42; TESTS=PASS",

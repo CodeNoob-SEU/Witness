@@ -103,6 +103,9 @@ class Result:
     hard_fallback: bool
     overflow: bool
     live_fact_recall: float
+    # Whether deterministic eviction alone met the hard budget (Tier 1 fit),
+    # measured directly rather than inferred from later tiers' behaviour.
+    tier1_fit: bool = False
 
 
 class ExtractiveBenchmarkCompressor:
@@ -764,6 +767,7 @@ async def _run_one(scenario: Scenario, strategy: str) -> Result:
         report.hard_fallback,
         report.overflow,
         round(recall, 4),
+        report.deterministic_chars <= HARD_LIMIT,
     )
 
 
@@ -1060,9 +1064,7 @@ async def run(output_dir: Path) -> dict[str, object]:
     tier1_fit_scenarios = {
         item.scenario
         for item in replacement
-        if item.strategy == "deterministic_only"
-        and not item.hard_fallback
-        and not item.overflow
+        if item.strategy == "deterministic_only" and item.tier1_fit
     }
     tier1_fit_tiered = [
         item

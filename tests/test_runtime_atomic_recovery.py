@@ -583,7 +583,7 @@ async def test_snapshot_eviction_replays_identical_active_projection_and_reuses_
         sort_keys=True,
         separators=(",", ":"),
     )
-    assert "persisted generated context summary" in first_projection
+    assert "working state; replaces transcript items" in first_projection
     await first_runtime.close()
 
     assert await journal.evict_snapshot(handle.run_id) is True

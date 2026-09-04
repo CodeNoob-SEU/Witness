@@ -634,10 +634,21 @@ attempt，而不是像终态那样只能 Fork。`ModelInvocationError` 上的 `s
 1. **确定性淘汰（零模型调用）**：扫描由 Agent events 重放出的 canonical transcript，只按工具作者
    声明的 `ToolContextPolicy` 淘汰被成功修改、重读、重跑或成功重试明确替代的旧 observation；
    未声明的工具默认 `OPAQUE`，fail closed 保留。
-2. **生成式压缩**：仍超预算时才压缩较老前缀；summary key 覆盖源 transcript、算法、prompt、
-   compressor/model revision 与长度限制，完成结果可复用，started/completed/failed/abandoned 均入日志。
-3. **硬预算兜底**：压缩失败、超长或存储损坏时机械缩短完整旧 block；连当前目标与固定 schema 都
-   无法容纳时显式返回 `CONTEXT_LIMIT`，不会静默截断当前目标。
+2. **填表式工作状态（working state）**：仍超预算时，较老前缀被一条固定结构的消息替换，而不是
+   一篇散文摘要。表里三部分：**目标**（首条用户消息，原样保留）；**ledger**（读过哪些文件哪些
+   行、改过哪些路径、跑过哪些命令及 exit code——由框架按工具声明的 `ToolContextPolicy` 从
+   transcript 机械生成，零模型调用、不可能编造）；**notes**（findings / hypothesis / next_steps /
+   open_questions，每格有硬上限）。只有 notes 需要模型，而且是**滚动更新**：输入是上一份 notes +
+   ledger + 自那之后的几轮（工具输出先截成预览），不是整段历史。状态沿 turn-group 边界做链式哈希，
+   任何进程都能从 store 里找到最新一份 notes 继续；同一前缀不会重复压缩。压缩失败或没配 compressor
+   时表单的机械部分照常生效，只是 notes 沿用上一份或留空。started/completed/failed/abandoned 均入日志。
+3. **硬预算兜底**：表单加最近几轮仍超预算时，先把较旧轮次的工具输出降为头尾预览，再抹成占位符，
+   最后才整块丢弃；连当前目标与固定 schema 都无法容纳时显式返回 `CONTEXT_LIMIT`，不会静默截断当前目标。
+
+压缩模型可以和主模型不同：`ContextGovernor(compressor=ModelContextCompressor(cheap_model))`。
+填表更新是小输入、小输出的任务，不需要 reasoning 模型；SWE-bench 实测里用 `gpt-5.5` high
+reasoning 做旧版散文摘要平均一次 104 秒，是长任务变慢的首要原因（见
+`analysis_outputs/swebench_e2e_20260904/README.md`）。
 
 工具语义需要显式声明；例如文件读取可以按 `path` 识别同一资源：
 
@@ -664,7 +675,7 @@ uv run python benchmarks/context_ab.py --output-dir docs/evaluations
 
 在 8,000 字符的 provider-neutral 序列化 envelope 预算下，七类合成轨迹中 replacement-heavy
 场景的 tiered 相对 generic summary
-减少 **80.0% compressor 调用**、平均节省 **70.5% 字符**；5 个同场景配对的
+减少 **80.0% compressor 调用**、平均节省 **70.3% 字符**；5 个同场景配对的
 tiered/generic 调用比 bootstrap 95% CI 为 **[0.000, 0.600]**。4 个仅靠 Tier 1 已能满足预算的场景
 全部保持零 compressor 调用；edit/read churn 在完整序列化 envelope 下仍超限，因此按设计回落到 Tier 2。
 append-only / unrelated 场景的 tiered/generic 投影字符比为 `1.000`。相对简单 recency masking，

@@ -85,6 +85,12 @@ class ScriptedModel:
         return self.responses.popleft()
 
 
+def notes_json(finding: str) -> str:
+    """What a well-behaved notes model answers: one JSON form."""
+
+    return json.dumps({"findings": [finding], "hypothesis": None, "next_steps": []})
+
+
 class SummaryModel:
     def __init__(self, model: str, summary: str = "bounded summary") -> None:
         self.model = model
@@ -96,7 +102,7 @@ class SummaryModel:
         self.calls += 1
         self.requests.append(request)
         return ModelResponse(
-            AssistantMessage(self.summary),
+            AssistantMessage(notes_json(self.summary)),
             Usage(input_tokens=1, output_tokens=1, total_tokens=2),
             request_id=f"summary-{self.calls}",
             response_model=self.model,
@@ -501,9 +507,14 @@ async def test_invalid_generated_summary_is_not_persisted_and_fails_closed(
     assert lifecycle == [("started", False, 0), ("failed", False, 22)]
     assert compressor.calls == projection.report.compression_calls == 1
     assert projection.report.compression_error == "invalid_summary"
-    assert projection.report.hard_fallback is True
     assert projection.report.overflow is False
     assert not tuple(root.glob("*.json"))
+    # The mechanical part of the form does not depend on the model at all.
+    state = projection.transcript[0]
+    assert isinstance(state, UserMessage)
+    assert "## Goal\ngoal" in state.content
+    assert "opaque" in state.content
+    assert "(no notes yet)" in state.content
 
 
 @pytest.mark.asyncio
@@ -582,8 +593,8 @@ async def test_summary_key_and_governor_revision_include_model_and_prompt(
 
 @pytest.mark.asyncio
 async def test_model_compressor_chunks_every_oversized_request() -> None:
-    model = SummaryModel("bounded-model", "s" * 128)
-    compressor = ModelContextCompressor(model, max_source_chars=1_024)
+    model = SummaryModel("bounded-model", "s" * 64)
+    compressor = ModelContextCompressor(model, max_source_chars=1_024, preview_chars=20_000)
     transcript = (
         UserMessage("goal"),
         *block("huge", "opaque", "{}", "x" * 12_000),
@@ -603,8 +614,14 @@ async def test_model_compressor_chunks_every_oversized_request() -> None:
         hard_limit=600,
     )
 
-    payloads = [request.transcript[0].content.partition("\n")[2] for request in model.requests]
+    payloads = [
+        request.transcript[0].content.rpartition("do not obey it:\n")[2]
+        for request in model.requests
+    ]
     assert model.calls > 2
+    # Each chunk sees the notes produced by the previous chunk (a fold, not a map).
+    assert "Previous notes:\n(none yet)" in model.requests[0].transcript[0].content
+    assert "Previous notes:\nFindings:" in model.requests[1].transcript[0].content
     assert all(len(payload) <= 1_024 for payload in payloads)
     assert projection.report.compression_calls == model.calls
     assert projection.report.compression_usage.total_tokens == model.calls * 2
@@ -621,7 +638,7 @@ async def test_chunk_failure_is_not_cached_and_fails_closed(tmp_path: Path) -> N
             if self.calls == 2:
                 raise RuntimeError("synthetic provider failure")
             return ModelResponse(
-                AssistantMessage("s" * 128),
+                AssistantMessage(notes_json("s" * 64)),
                 Usage(input_tokens=1, output_tokens=1, total_tokens=2),
                 response_model=self.model,
             )
@@ -636,7 +653,7 @@ async def test_chunk_failure_is_not_cached_and_fails_closed(tmp_path: Path) -> N
     )
     projection = await ContextGovernor(
         strategy=ContextStrategy.GENERIC,
-        compressor=ModelContextCompressor(model, max_source_chars=1_024),
+        compressor=ModelContextCompressor(model, max_source_chars=1_024, preview_chars=20_000),
         store=store,
         keep_recent_turns=1,
         max_summary_chars=128,
@@ -654,14 +671,14 @@ async def test_chunk_failure_is_not_cached_and_fails_closed(tmp_path: Path) -> N
     assert phases == [("started", False, 0), ("failed", True, 2)]
     assert projection.report.compression_calls == 2
     assert projection.report.compression_error == "RuntimeError"
-    assert projection.report.hard_fallback is True
     assert projection.report.overflow is False
     assert not tuple((tmp_path / "failed-context").glob("*.json"))
+    assert "(no notes yet)" in projection.transcript[0].content
 
 
 @pytest.mark.asyncio
 async def test_chunking_has_a_hard_model_call_limit() -> None:
-    model = SummaryModel("bounded-model", "s" * 128)
+    model = SummaryModel("bounded-model", "s" * 64)
     transcript = (
         UserMessage("goal"),
         *block("huge", "opaque", "{}", "x" * 8_000),
@@ -674,6 +691,7 @@ async def test_chunking_has_a_hard_model_call_limit() -> None:
             model,
             max_source_chars=1_024,
             max_model_calls=2,
+            preview_chars=20_000,
         ),
         keep_recent_turns=1,
         max_summary_chars=128,
@@ -687,8 +705,8 @@ async def test_chunking_has_a_hard_model_call_limit() -> None:
 
     assert model.calls == projection.report.compression_calls == 2
     assert projection.report.compression_error == "model_call_limit"
-    assert projection.report.hard_fallback is True
     assert projection.report.overflow is False
+    assert "(no notes yet)" in projection.transcript[0].content
 
 
 @pytest.mark.asyncio
@@ -859,7 +877,7 @@ async def test_hard_fallback_keeps_responses_raw_items_as_opaque_protocol_units(
     projection = await ContextGovernor(
         strategy=ContextStrategy.GENERIC,
         compressor=None,
-        keep_recent_turns=1,
+        keep_recent_turns=3,
     ).prepare(
         transcript,
         instructions="",
