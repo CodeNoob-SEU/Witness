@@ -35,6 +35,7 @@ from .journal import InMemoryRunJournal, RunJournal
 from .models import AgentResult, AgentStreamEvent, RunStatus, StopReason, TranscriptItem
 from .postgres_journal import PostgresRunJournal
 from .provider import ApiMode, OpenAIModel, ProviderCapabilities
+from .repo_tools import create_repository_tools
 from .runtime import (
     AdjustCost,
     AgentRuntime,
@@ -52,7 +53,7 @@ from .runtime import (
     StartRun,
 )
 from .telemetry import MetricCardinalityPolicy, create_telemetry
-from .tools import DebugExposure, tool
+from .tools import DebugExposure, Tool, tool
 from .workspace import GitWorktreeWorkspace, WorkspaceCheckpointStore
 
 _STATIC_DIR = Path(__file__).with_name("static")
@@ -521,19 +522,56 @@ def _build_agent_from_env() -> tuple[OpenAIModel, ReActAgent, str, ApiMode]:
     )
     agent = ReActAgent(
         model,
-        [calculate_expression],
-        config=AgentConfig(
-            max_steps=8,
-            max_tool_calls=16,
-            max_wall_time_s=120.0,
-            max_concurrent_tools=4,
-            max_tool_output_chars=8_000,
-            max_context_chars=160_000,
-            context_strategy=context_strategy,
-        ),
+        _tools_from_env(),
+        config=_agent_config_from_env(context_strategy),
         context_governor=context_governor,
     )
     return model, agent, model_name, api_mode
+
+
+def _repository_tools_enabled() -> bool:
+    return os.getenv("REACT_AGENT_REPOSITORY") is not None
+
+
+def _tools_from_env() -> list[Tool]:
+    """Register repository tools only when a managed workspace is configured.
+
+    Without ``REACT_AGENT_REPOSITORY`` there is no isolated worktree, so the
+    workbench keeps its network-free calculator as the only tool.
+    """
+
+    tools: list[Tool] = [calculate_expression]
+    if _repository_tools_enabled():
+        tools.extend(
+            create_repository_tools(
+                require_command_approval=_truthy_env("REACT_AGENT_COMMAND_APPROVAL"),
+            )
+        )
+    return tools
+
+
+def _agent_config_from_env(context_strategy: ContextStrategy) -> AgentConfig:
+    if _repository_tools_enabled():
+        return AgentConfig(
+            max_steps=60,
+            max_tool_calls=200,
+            max_wall_time_s=3_600.0,
+            max_concurrent_tools=4,
+            max_tool_output_chars=30_000,
+            max_context_chars=400_000,
+            context_strategy=context_strategy,
+            context_keep_recent_turns=3,
+            repeated_action_limit=5,
+        )
+    return AgentConfig(
+        max_steps=8,
+        max_tool_calls=16,
+        max_wall_time_s=120.0,
+        max_concurrent_tools=4,
+        max_tool_output_chars=8_000,
+        max_context_chars=160_000,
+        context_strategy=context_strategy,
+    )
 
 
 def _public_run_error(status: str, stop_reason: str) -> str | None:

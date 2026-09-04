@@ -5,7 +5,7 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, Field
 
-from react_agent import ToolCall, ToolRegistry, tool
+from react_agent import ToolCall, ToolError, ToolRegistry, tool
 
 
 class NestedInput(BaseModel):
@@ -133,3 +133,43 @@ async def test_approval_handler_cannot_mutate_executed_arguments() -> None:
 
     assert result.is_error is False
     assert executed == [{"values": [1]}]
+
+
+@pytest.mark.asyncio
+async def test_tool_error_message_is_passed_through_but_other_exceptions_stay_opaque() -> None:
+    @tool(idempotent=True)
+    def expected_failure(path: str) -> str:
+        """Fail with a message written for the model."""
+
+        raise ToolError(f"{path} was not found.", code="NOT_FOUND")
+
+    @tool(idempotent=True)
+    def unexpected_failure(path: str) -> str:
+        """Fail with an exception that may carry secrets."""
+
+        raise RuntimeError("psql: password=hunter2 rejected")
+
+    registry = ToolRegistry([expected_failure, unexpected_failure])
+    expected = await registry.execute(
+        ToolCall("call-1", "expected_failure", '{"path":"a.py"}'),
+        run_id="run",
+        approval_handler=None,
+        max_output_chars=1_000,
+    )
+    unexpected = await registry.execute(
+        ToolCall("call-2", "unexpected_failure", '{"path":"a.py"}'),
+        run_id="run",
+        approval_handler=None,
+        max_output_chars=1_000,
+    )
+
+    expected_payload = json.loads(expected.content)
+    assert expected.is_error is True and expected.executed is True
+    assert expected_payload["error"] == {
+        "code": "NOT_FOUND",
+        "message": "a.py was not found.",
+        "retryable": False,
+    }
+    unexpected_payload = json.loads(unexpected.content)
+    assert unexpected_payload["error"]["code"] == "TOOL_EXCEPTION"
+    assert "hunter2" not in unexpected.content

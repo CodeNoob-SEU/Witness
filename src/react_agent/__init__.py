@@ -52,6 +52,14 @@ from .models import (
 )
 from .postgres_journal import PostgresRunJournal
 from .provider import ApiMode, Model, OpenAIModel, ProviderCapabilities, StreamingModel
+from .repo_tools import (
+    CommandResult,
+    CommandRunner,
+    ContainerCommandRunner,
+    LocalCommandRunner,
+    RepositoryToolError,
+    create_repository_tools,
+)
 from .runtime import (
     AdjustCost,
     AgentRuntime,
@@ -76,6 +84,7 @@ from .tools import (
     ApprovalRequest,
     DebugExposure,
     Tool,
+    ToolError,
     ToolExecutionContext,
     ToolRegistry,
     ToolResumePolicy,
@@ -96,7 +105,10 @@ __all__ = [
     "ApprovalRequest",
     "AssistantMessage",
     "CancelRun",
+    "CommandResult",
+    "CommandRunner",
     "ConfigurationError",
+    "ContainerCommandRunner",
     "ContextCompression",
     "ContextCompressor",
     "ContextGovernanceReport",
@@ -117,6 +129,7 @@ __all__ = [
     "GitWorktreeWorkspace",
     "InMemoryContextSummaryStore",
     "InMemoryRunJournal",
+    "LocalCommandRunner",
     "Model",
     "ModelContextCompressor",
     "ModelInvocationError",
@@ -135,6 +148,7 @@ __all__ = [
     "PythonRuntimeDebugger",
     "ReActAgent",
     "ReActAgentError",
+    "RepositoryToolError",
     "ResolutionAction",
     "ResolveRun",
     "ResumeRun",
@@ -149,6 +163,7 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolContextPolicy",
+    "ToolError",
     "ToolExecutionContext",
     "ToolMessage",
     "ToolRegistry",
@@ -158,6 +173,7 @@ __all__ = [
     "Usage",
     "UserMessage",
     "create_python_debug_tools",
+    "create_repository_tools",
     "create_telemetry",
     "deterministic_evict",
     "estimate_context_chars",

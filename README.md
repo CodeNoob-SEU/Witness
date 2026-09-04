@@ -39,7 +39,7 @@ ReAct 循环，还提供一套可审计的执行底座：把已经提交的事�
 | PostgreSQL Journal | ✅ 已实现 | PostgreSQL 16+、CAS、幂等 operation、租约、fencing、Session 单活 Run |
 | Session Resume | ✅ 已实现 | 新 execution 恢复、模型 abandoned、工具恢复策略、人工 reconciliation |
 | Live / Replay | ✅ 已实现 | durable SSE、实时模型 delta、Timeline、Audit、只读 Replay、安全 Fork |
-| 仓库级任务 | ✅ 已实现 | Session 隔离 Git worktree、前后 checkpoint、diff 摘要与偏离检测 |
+| 仓库级任务 | ✅ 已实现 | Session 隔离 Git worktree、前后 checkpoint、diff 摘要与偏离检测、内置七个仓库工具 |
 | Token / 成本 | ✅ 已实现 | usage 明细、冻结成本记录、独立追加式成本调整账本、Session 汇总 |
 | OpenTelemetry | ✅ 已实现 | Agent / model / tool span、Resume Span Link、GenAI metrics、隐私投影 |
 | 前端工作台 | ✅ 已实现 | Live、Timeline、Audit、Replay、Workspace Diff、Cost、History |
@@ -142,6 +142,7 @@ python examples/quickstart.py
 | `DATABASE_URL` | 否 | PostgreSQL DSN 的兼容 fallback。两个 DSN 都未设置时使用进程内 journal。 |
 | `REACT_AGENT_REPOSITORY` | 否，成对 | 要隔离操作的 non-bare Git worktree。必须与 `REACT_AGENT_WORKTREE_ROOT` 同时设置。 |
 | `REACT_AGENT_WORKTREE_ROOT` | 否，成对 | Session worktree 的独立 managed root；不能与 repository 互相包含。 |
+| `REACT_AGENT_COMMAND_APPROVAL` | 否 | `true` 时 Web 工作台的 `run_command` 需要审批；仅在配置了仓库 worktree 时生效。 |
 | `REACT_AGENT_CONTEXT_STRATEGY` | 否 | Web Runtime 的上下文策略：`tiered`（默认）、`generic` 或 `stop`。 |
 | `REACT_AGENT_CONTEXT_SUMMARY_DIR` | 生产建议 | 私有持久化 summary 目录；未设置时只使用进程内 cache，无法跨进程 Resume 复用。 |
 | `REACT_AGENT_WEB_HOST` | 否 | Web 监听地址，默认 `127.0.0.1`。 |
@@ -231,6 +232,46 @@ def lookup_inventory(
 ```json
 {"ok":false,"error":{"code":"INVALID_ARGUMENTS","message":"...","retryable":false}}
 ```
+
+## 内置仓库工具
+
+仓库级任务需要一组语义声明正确的工具，而不是每个应用各写一份。`create_repository_tools()`
+返回七个绑定到 Session worktree 的 typed tool：`list_dir`、`read_file`、`search_text`、
+`write_file`、`edit_file`、`run_tests`、`run_command`。
+
+```python
+from react_agent import ContainerCommandRunner, LocalCommandRunner, create_repository_tools
+
+# 命令在本机执行，只透传 PATH/HOME/LANG 等白名单环境变量，API key 不会进入模型编写的命令。
+tools = create_repository_tools(command_runner=LocalCommandRunner())
+
+# 或在一次性容器中执行：worktree 以当前用户身份挂载，默认无网络。
+tools = create_repository_tools(
+    command_runner=ContainerCommandRunner(
+        "ghcr.io/example/testbed:1", mount_path="/testbed", shell="/bin/bash",
+        setup=". /opt/venv/bin/activate",
+    ),
+    test_command="python -m pytest -p no:cacheprovider",
+)
+```
+
+声明一次做对的语义：读取类工具是 `READ` 且按 `path`（`read_file` 还包含行范围）识别资源；
+`write_file`/`edit_file` 是按 `path` 识别的 `MUTATE`，因此 Tier 1 治理可以淘汰被替代的旧读取；
+`edit_file` 对已应用的替换返回 `already_applied`，所以它和 `run_tests` 一样是真正幂等的，中断后
+可自动重试；`run_command` 显式声明为非幂等，worker 在命令执行中死亡时进入 reconciliation 而不是
+盲目重跑。所有路径都在 `ToolExecutionContext.workspace_path` 内解析，越界、符号链接逃逸、
+`.git` 内部和敏感文件（密钥、`.env`、credentials）都会被拒绝；`run_tests` 的参数经 `shlex`
+逐个引用，模型无法注入 shell 语法。
+
+工具作者若要把一条给模型看的失败原因（例如 "old_string was not found"）传回模型，应抛出
+`ToolError`；其他异常仍会被压缩为不含信息的 `TOOL_EXCEPTION`，避免堆栈、路径或凭据进入 transcript。
+
+Web 工作台在同时设置 `REACT_AGENT_REPOSITORY` 与 `REACT_AGENT_WORKTREE_ROOT` 时会自动注册这组
+工具并切换到仓库任务的预算（60 步 / 200 次工具调用 / 1 小时）；否则只保留本地计算器。
+
+一个已知边界：worktree 只包含 Git 跟踪的文件。被 `.gitignore` 忽略的生成物（例如 setuptools_scm
+写出的 `_version.py`、`.venv`、构建产物）不会出现在隔离 worktree 中，需要由部署方在主仓库提交或由
+`CommandRunner` 的镜像提供。
 
 ## 审批高风险工具
 

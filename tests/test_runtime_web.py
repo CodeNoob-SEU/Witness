@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import ClassVar, cast
 
 import httpx
@@ -11,6 +12,7 @@ import pytest
 
 import react_agent.web as web_module
 from react_agent.agent import ReActAgent
+from react_agent.context import ContextStrategy
 from react_agent.events import (
     PendingAction,
     PendingKind,
@@ -1013,3 +1015,30 @@ async def test_missing_run_is_a_preflight_http_404_not_an_sse_error() -> None:
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
+
+
+def test_repository_tools_are_registered_only_with_a_managed_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("REACT_AGENT_REPOSITORY", raising=False)
+    monkeypatch.delenv("REACT_AGENT_COMMAND_APPROVAL", raising=False)
+    assert [t.name for t in web_module._tools_from_env()] == ["calculate_expression"]
+    assert web_module._agent_config_from_env(ContextStrategy.TIERED).max_steps == 8
+
+    monkeypatch.setenv("REACT_AGENT_REPOSITORY", str(tmp_path / "repo"))
+    monkeypatch.setenv("REACT_AGENT_COMMAND_APPROVAL", "true")
+    names = [t.name for t in web_module._tools_from_env()]
+    assert names == [
+        "calculate_expression",
+        "list_dir",
+        "read_file",
+        "search_text",
+        "write_file",
+        "edit_file",
+        "run_tests",
+        "run_command",
+    ]
+    run_command = next(t for t in web_module._tools_from_env() if t.name == "run_command")
+    assert run_command.requires_approval is True
+    config = web_module._agent_config_from_env(ContextStrategy.TIERED)
+    assert config.max_steps == 60 and config.max_wall_time_s == 3_600.0

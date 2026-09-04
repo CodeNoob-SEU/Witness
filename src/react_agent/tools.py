@@ -28,6 +28,7 @@ PrivateResultEncoder = Callable[[Any], Mapping[str, JsonValue]]
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _MAX_PRIVATE_RESULT_BYTES = 512 * 1024
+_MAX_TOOL_ERROR_CHARS = 2_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,22 @@ class ApprovalRequest:
 
 ApprovalHandler = Callable[[ApprovalRequest], bool | Awaitable[bool]]
 SideEffectGuard = Callable[[], Awaitable[None] | None]
+
+
+class ToolError(Exception):
+    """An expected tool failure whose message is safe to show the model.
+
+    Ordinary exceptions are reduced to an opaque ``TOOL_EXCEPTION`` so stack
+    traces, paths, and secrets cannot leak into the transcript.  Tool authors
+    raise ``ToolError`` only for messages they wrote for the model, such as
+    "old_string was not found"; the message is bounded and never includes the
+    traceback.
+    """
+
+    def __init__(self, message: str, *, code: str = "TOOL_ERROR", retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 class ToolLifecycle(Protocol):
@@ -539,6 +556,16 @@ class ToolRegistry:
             )
         except asyncio.CancelledError:
             raise
+        except ToolError as exc:
+            return _error_message(
+                call,
+                exc.code if _TOOL_NAME.fullmatch(exc.code) else "TOOL_ERROR",
+                str(exc)[:_MAX_TOOL_ERROR_CHARS] or "The tool reported a failure.",
+                retryable=exc.retryable,
+                executed=True,
+                duration_ms=(time.monotonic() - started) * 1000,
+                max_chars=max_output_chars,
+            )
         except Exception as exc:
             return _error_message(
                 call,
