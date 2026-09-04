@@ -132,6 +132,21 @@ class RunJournal(Protocol):
         timeout_s: float | None = None,
     ) -> tuple[StoredRunEvent, ...]: ...
 
+    async def list_orphaned_runs(
+        self,
+        *,
+        limit: int = 100,
+        agent_revision: str | None = None,
+    ) -> tuple[str, ...]:
+        """Non-terminal runs whose writer lease is absent or expired.
+
+        The candidates a supervisor may try to Resume, most recently updated
+        first. ``agent_revision`` restricts the listing to runs this Agent
+        binding could actually Resume. Reconciliation state is still the
+        Runtime's decision.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class _CommittedOperation:
@@ -509,6 +524,27 @@ class InMemoryRunJournal:
             log.lease_fence = None
             log.lease_expires_at = 0.0
             self._condition.notify_all()
+
+    async def list_orphaned_runs(
+        self,
+        *,
+        limit: int = 100,
+        agent_revision: str | None = None,
+    ) -> tuple[str, ...]:
+        if limit < 1 or limit > 1_000:
+            raise ValueError("limit must be between 1 and 1000")
+        async with self._condition:
+            now = self._clock()
+            orphaned = [
+                (log.events[-1].occurred_at, run_id)
+                for run_id, log in self._runs.items()
+                if log.events
+                and log.events[-1].kind not in TERMINAL_EVENT_KINDS
+                and (log.lease_owner is None or log.lease_expires_at <= now)
+                and (agent_revision is None or log.events[0].agent_revision == agent_revision)
+            ]
+            orphaned.sort(key=lambda item: (-item[0], item[1]))
+            return tuple(run_id for _, run_id in orphaned[:limit])
 
     async def renew(self, lease: JournalLease, *, ttl_s: float) -> JournalLease:
         if ttl_s <= 0:

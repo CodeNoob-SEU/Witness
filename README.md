@@ -136,6 +136,28 @@ uv run python examples/chaos_resume.py
 模型 attempt 会被记为**成本未知**而不是 0。同样的场景固化在 `tests/test_chaos_recovery.py`，
 在 CI 里每次都会真实地 `SIGKILL` 一个子进程。
 
+加 `--supervisor` 时 worker B **不知道哪个 run 死了**：它只运行一个 `RunSupervisor`，由它向 journal
+询问「非终态且 lease 已过期」的 run 并提交 `ResumeRun`。这就是"kill -9 之后自愈"的形态，
+Web 进程用 `REACT_AGENT_SUPERVISOR=true` 常驻同一个循环：
+
+```bash
+uv run python examples/chaos_resume.py --supervisor
+```
+
+```python
+from react_agent import AgentRuntime, RunSupervisor
+
+supervisor = RunSupervisor(runtime, interval_s=5.0, max_executions_per_run=8,
+                           on_attention=lambda run: alert(run.run_id, run.outcome))
+supervisor.start()          # 后台循环；await supervisor.stop() 退出
+sweep = await supervisor.sweep()   # 或手动扫一次：sweep.resumed / sweep.attention
+```
+
+Supervisor 刻意保守：只走 `ResumeRun` 的既有路径（fencing、幂等重试、fail-closed reconciliation、
+revision 检查一个不少）；别人持有 lease 的 run 不碰；`needs_reconciliation`、`ResumeRejected` 和
+超过 `max_executions_per_run` 的 run 只通过 `on_attention` 上报，不再重试；同一 run 的连续 Resume
+之间在进程内指数退避。它能修的是"进程死了"和"模型暂时不可用"，不会替操作员做副作用判断。
+
 ## 双 worker 抢占与 fencing
 
 租约只能回答「谁应该在写」，回答不了「这次写是不是当前 owner 发出的」——进程可能因为 GC
@@ -362,6 +384,8 @@ python examples/quickstart.py
 | `REACT_AGENT_REPOSITORY` | 否，成对 | 要隔离操作的 non-bare Git worktree。必须与 `REACT_AGENT_WORKTREE_ROOT` 同时设置。 |
 | `REACT_AGENT_WORKTREE_ROOT` | 否，成对 | Session worktree 的独立 managed root；不能与 repository 互相包含。 |
 | `REACT_AGENT_COMMAND_APPROVAL` | 否 | `true` 时 Web 工作台的 `run_command` 需要审批；仅在配置了仓库 worktree 时生效。 |
+| `REACT_AGENT_SUPERVISOR` | 否 | `true` 时 Web 进程内运行 `RunSupervisor`：定期把 lease 已过期的非终态 run `ResumeRun`，`GET /api/supervisor` 查看最近一次 sweep。 |
+| `REACT_AGENT_SUPERVISOR_INTERVAL_S` | 否 | Supervisor 的 sweep 间隔，默认 `5`。 |
 | `REACT_AGENT_CONTEXT_STRATEGY` | 否 | Web Runtime 的上下文策略：`tiered`（默认）、`generic` 或 `stop`。 |
 | `REACT_AGENT_CONTEXT_SUMMARY_DIR` | 生产建议 | 私有持久化 summary 目录；未设置时只使用进程内 cache，无法跨进程 Resume 复用。 |
 | `REACT_AGENT_WEB_HOST` | 否 | Web 监听地址，默认 `127.0.0.1`。 |

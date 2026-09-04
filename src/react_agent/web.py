@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, cast, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, cast, runtime_checkable
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -43,6 +43,7 @@ from .demo import (
     demo_pricing,
     seed_demo_repository,
 )
+from .errors import ConfigurationError
 from .evals import WORKSPACE_SUITE, ReferenceWorkspaceModel, run_suite
 from .events import RunSnapshot, StoredRunEvent, verify_event_chain
 from .journal import InMemoryRunJournal, RunJournal
@@ -67,6 +68,7 @@ from .runtime import (
     RuntimeNotFound,
     StartRun,
 )
+from .supervisor import RunSupervisor
 from .telemetry import MetricCardinalityPolicy, create_telemetry
 from .tools import DebugExposure, Tool, tool
 from .workspace import GitWorktreeWorkspace, WorkspaceCheckpointStore
@@ -421,6 +423,19 @@ def _truthy_env(name: str, *, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _supervisor_interval_from_env() -> float:
+    raw = os.getenv("REACT_AGENT_SUPERVISOR_INTERVAL_S")
+    if raw is None or not raw.strip():
+        return 5.0
+    try:
+        interval = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError("REACT_AGENT_SUPERVISOR_INTERVAL_S must be a number") from exc
+    if interval <= 0:
+        raise ConfigurationError("REACT_AGENT_SUPERVISOR_INTERVAL_S must be positive")
+    return interval
 
 
 def _metric_dimension_allowlist(
@@ -1394,6 +1409,7 @@ def create_app(
         owned_model: OpenAIModel | None = None
         owned_runtime: AgentRuntime | None = None
         owned_journal: PostgresRunJournal | None = None
+        owned_supervisor: RunSupervisor | None = None
         try:
             if agent is None and runtime is None:
                 demo = _build_demo_from_env()
@@ -1437,9 +1453,18 @@ def create_app(
                 app.state.model_name = configured_model
                 app.state.api_mode = configured_mode
                 app.state.demo = demo
+                if _truthy_env("REACT_AGENT_SUPERVISOR"):
+                    owned_supervisor = RunSupervisor(
+                        owned_runtime,
+                        interval_s=_supervisor_interval_from_env(),
+                    )
+                    owned_supervisor.start()
+                    app.state.supervisor = owned_supervisor
             yield
         finally:
             try:
+                if owned_supervisor is not None:
+                    await owned_supervisor.stop()
                 if owned_runtime is not None:
                     await owned_runtime.close()
             finally:
@@ -1492,6 +1517,27 @@ def create_app(
             model=cast(str, request.app.state.model_name),
             api_mode=cast(ApiMode, request.app.state.api_mode),
         )
+
+    @app.get("/api/supervisor")
+    async def supervisor_status(request: Request) -> dict[str, Any]:
+        supervisor = cast(RunSupervisor | None, getattr(request.app.state, "supervisor", None))
+        if supervisor is None:
+            return {"enabled": False}
+        last = supervisor.last_sweep
+        return {
+            "enabled": True,
+            "interval_s": supervisor.interval_s,
+            "max_executions_per_run": supervisor.max_executions_per_run,
+            "sweeps": supervisor.sweeps,
+            "last_sweep": last.to_json() if last is not None else None,
+        }
+
+    @app.post("/api/supervisor/sweep")
+    async def supervisor_sweep(request: Request) -> dict[str, Any]:
+        supervisor = cast(RunSupervisor | None, getattr(request.app.state, "supervisor", None))
+        if supervisor is None:
+            raise HTTPException(status_code=404, detail="Supervisor is not enabled.")
+        return (await supervisor.sweep()).to_json()
 
     @app.post("/api/runs", status_code=202)
     async def start_run(payload: StartRunRequest, request: Request) -> JSONResponse:

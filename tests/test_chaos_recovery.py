@@ -196,3 +196,41 @@ async def test_a_killed_workers_lease_blocks_takeover_until_it_expires(
     finally:
         if first.poll() is None:
             first.kill()
+
+
+@pytest.mark.asyncio
+async def test_sigkill_is_healed_by_a_supervisor_that_never_learns_the_run_id(
+    tmp_path: Path,
+) -> None:
+    """Worker B only runs a RunSupervisor; the orphan is found via the journal."""
+
+    session_id = f"chaos-{uuid.uuid4().hex[:12]}"
+    run_id_file = tmp_path / "run_id.txt"
+    journal = await _open_journal()
+    first = _spawn("start", run_id_file, session_id, tmp_path)
+    try:
+        run_id = _await_run_id(run_id_file, timeout_s=90.0)
+        assert await _await_kind(
+            journal, run_id, RunEventKind.TOOL_STARTED, timeout_s=90.0
+        ), "tool_started never committed, so nothing was at risk"
+
+        os.kill(first.pid, signal.SIGKILL)
+        assert first.wait(timeout=60) != 0
+
+        second = _spawn("supervise", run_id_file, session_id, tmp_path)
+        output, _ = second.communicate(timeout=240)
+        assert second.returncode == 0, output
+        assert "outcome=resumed" in output, output
+        assert "CHAOS_RESULT status=completed" in output, output
+    finally:
+        if first.poll() is None:
+            first.kill()
+
+    final = await journal.load(run_id)
+    events = await journal.read(run_id)
+    verify_event_chain(events)
+    assert final.status == "completed"
+    assert len(final.executions) >= 2
+    resumed = next(event for event in events if event.kind is RunEventKind.RUN_RESUMED)
+    assert resumed.data["resume_reason"] == "tool_retry"
+    assert run_id not in await journal.list_orphaned_runs()

@@ -9,6 +9,11 @@ back-dated history behind.
 
     export REACT_AGENT_POSTGRES_DSN=postgresql://user:pass@127.0.0.1:5432/db
     uv run python examples/chaos_resume.py
+
+With ``--supervisor`` worker B is not told which run died. It only runs a
+:class:`RunSupervisor`, which lists non-terminal runs whose lease has expired
+and Resumes them — the same self-healing loop a long-lived web process runs
+with ``REACT_AGENT_SUPERVISOR=true``.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from react_agent.events import RunEventKind, StoredRunEvent, verify_event_chain
 from react_agent.journal import RunNotFoundError
 from react_agent.postgres_journal import PostgresRunJournal
 from react_agent.runtime import AgentRuntime, RuntimeConflict
+from react_agent.supervisor import RunSupervisor
 
 EFFECTS_ENV = "REACT_AGENT_CHAOS_DIR"
 # Short enough that the demo does not idle waiting for a dead worker's lease,
@@ -123,6 +129,35 @@ async def run_worker(dsn: str, mode: str, run_id_file: Path, session_id: str) ->
                 return 0
 
             run_id = await asyncio.to_thread(_read_run_id, run_id_file)
+            if mode == "supervise":
+                # Worker B does not use run_id to act, only to know when to
+                # stop. The supervisor finds the orphan by itself.
+                supervisor = RunSupervisor(runtime, interval_s=0.5)
+                deadline = time.monotonic() + 60.0
+                while time.monotonic() < deadline:
+                    sweep = await supervisor.sweep()
+                    for supervised in sweep.runs:
+                        print(
+                            f"   supervisor: run={supervised.run_id[:12]} "
+                            f"outcome={supervised.outcome} executions={supervised.executions}"
+                        )
+                    # A shared database may hold other orphans; only ours ends
+                    # the demo. Until its lease expires it is not even listed.
+                    if any(
+                        supervised.run_id == run_id and supervised.outcome == "resumed"
+                        for supervised in sweep.runs
+                    ):
+                        break
+                    await asyncio.sleep(supervisor.interval_s)
+                else:
+                    raise TimeoutError("the supervisor never resumed the killed run")
+                snapshot = await runtime.wait(run_id, timeout_s=120.0)
+                answer = ""
+                if snapshot.result is not None:
+                    answer = str(snapshot.result.get("output") or "")
+                print(f"{RESULT_PREFIX}status={snapshot.status} answer={answer}")
+                return 0
+
             deadline = time.monotonic() + 30.0
             while True:
                 try:
@@ -227,7 +262,7 @@ def _print_chain(events: tuple[StoredRunEvent, ...], *, title: str) -> None:
         print(f"   {event.sequence:>3}  {event.kind.value:<26}{marker}")
 
 
-async def orchestrate(dsn: str, effects: Path) -> int:
+async def orchestrate(dsn: str, effects: Path, *, via_supervisor: bool = False) -> int:
     session_id = f"chaos-{uuid.uuid4().hex[:12]}"
     run_id_file = effects / "run_id.txt"
     journal = await _open_journal(dsn)
@@ -266,9 +301,14 @@ async def orchestrate(dsn: str, effects: Path) -> int:
         )
 
         print("\n" + "=" * 68)
-        print("STEP 3  worker B resumes from durable facts alone")
+        if via_supervisor:
+            print("STEP 3  worker B runs a RunSupervisor; it finds and resumes the orphan")
+        else:
+            print("STEP 3  worker B resumes from durable facts alone")
         print("=" * 68)
-        second = _spawn_worker("resume", run_id_file, session_id, effects)
+        second = _spawn_worker(
+            "supervise" if via_supervisor else "resume", run_id_file, session_id, effects
+        )
         output, _ = second.communicate(timeout=180)
         for line in output.splitlines():
             print(f"   {line}")
@@ -308,9 +348,14 @@ async def orchestrate(dsn: str, effects: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--worker", choices=("start", "resume"))
+    parser.add_argument("--worker", choices=("start", "resume", "supervise"))
     parser.add_argument("--run-id-file")
     parser.add_argument("--session-id")
+    parser.add_argument(
+        "--supervisor",
+        action="store_true",
+        help="let a RunSupervisor discover and resume the killed run",
+    )
     arguments = parser.parse_args()
 
     dsn = os.getenv("REACT_AGENT_POSTGRES_DSN") or os.getenv("TEST_POSTGRES_DSN")
@@ -338,9 +383,11 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory(prefix="react-agent-chaos-") as directory:
             os.environ[EFFECTS_ENV] = directory
-            return asyncio.run(orchestrate(dsn, Path(directory)))
+            return asyncio.run(
+                orchestrate(dsn, Path(directory), via_supervisor=arguments.supervisor)
+            )
     effects.mkdir(parents=True, exist_ok=True)
-    return asyncio.run(orchestrate(dsn, effects))
+    return asyncio.run(orchestrate(dsn, effects, via_supervisor=arguments.supervisor))
 
 
 if __name__ == "__main__":

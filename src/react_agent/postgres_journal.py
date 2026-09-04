@@ -1770,6 +1770,31 @@ class PostgresRunJournal:
             rows = await cursor.fetchall()
             return tuple(str(row["run_id"]) for row in rows)
 
+    async def list_orphaned_runs(
+        self,
+        *,
+        limit: int = 100,
+        agent_revision: str | None = None,
+    ) -> tuple[str, ...]:
+        if limit < 1 or limit > 1_000:
+            raise ValueError("limit must be between 1 and 1000")
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT run_id FROM react_agent_runs
+                WHERE NOT terminal
+                    AND head_sequence > 0
+                    AND (%s::text IS NULL OR agent_revision = %s)
+                    AND (lease_owner IS NULL
+                         OR lease_expires_at IS NULL
+                         OR lease_expires_at <= clock_timestamp())
+                ORDER BY updated_at DESC, run_id LIMIT %s
+                """,
+                (agent_revision, agent_revision, limit),
+            )
+            rows = await cursor.fetchall()
+            return tuple(str(row["run_id"]) for row in rows)
+
     @staticmethod
     def _cost_adjustment_from_row(row: Mapping[str, Any]) -> StoredCostAdjustment:
         payload = row["public_payload"]

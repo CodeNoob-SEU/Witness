@@ -78,6 +78,7 @@ from .runtime_debugger import (
     DebugSessionState,
     PythonRuntimeDebugger,
 )
+from .supervisor import RunSupervisor, SupervisedRun, SupervisorSweep
 from .telemetry import TraceReference, create_telemetry
 from .tools import (
     ApprovalHandler,
@@ -155,11 +156,14 @@ __all__ = [
     "RunHandle",
     "RunJournal",
     "RunStatus",
+    "RunSupervisor",
     "RuntimeEvent",
     "StartRun",
     "StopReason",
     "StreamSink",
     "StreamingModel",
+    "SupervisedRun",
+    "SupervisorSweep",
     "Tool",
     "ToolCall",
     "ToolContextPolicy",
