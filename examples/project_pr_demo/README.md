@@ -1,16 +1,18 @@
 # Crash-to-Proof PR：本地 P0 Vertical Slice
 
-这个 Demo 面向面试或技术评审，集中展示一件事：
+**Witness 是一个 CI 自动修复 Agent Runtime。** 这个本地 Demo 展示修复执行与结果发布中断时的
+恢复机制，PR 是其结果交付载体。它面向面试或技术评审，集中展示一件事：
 
 > 当 coding worker 和 PR publisher 分别在关键副作用边界中断时，Witness 如何从已经提交的事实恢复，避免盲目重复外部写入，并生成一份可复核的 PR Evidence。
 
-它不是一个“模型更聪明”的演示。模型响应、代码改动和故障位置都是确定性的，目的是把 Runtime 的恢复协议单独暴露出来，避免现场模型随机性掩盖系统能力。
+模型响应、代码改动和故障位置都是确定性的，用于单独验证 Runtime 的恢复协议。Demo 未接收真实
+CI 失败事件，也不衡量模型自动定位和修复 CI 错误的成功率。
 
 当前实现是一个本地 P0 vertical slice：核心状态机、outbox、observe-before-write、lease/fencing、worktree 恢复和 Evidence renderer 都是真实代码；Forge、PR store、Runtime journal 和模型则使用本地或内存 Adapter。它不连接 GitHub，也不是生产部署方案。
 
-## 30 秒定位
+## 30 秒理解 Demo 范围
 
-普通 coding-agent Demo 通常只展示“读代码、改代码、跑测试”。本 Demo 追加两个更难的故障问题：
+围绕代码修改、验证和结果交付，本 Demo 验证两个故障问题：
 
 1. 工具已经开始修改 worktree，但 worker 在结果提交前消失，下一任 worker 能否恢复到可信 checkpoint 后再安全重试？
 2. 远端 check 已经创建，但 publisher 没收到返回值，下一任 publisher 会不会盲目再次创建一个重复 check？
@@ -220,7 +222,7 @@ candidate tree、patch/test/evidence digests 与 PR head 一起封存。发布�
 
 一句收尾可以用：
 
-> Witness 的差异不是多一个 Resume 按钮，而是把“何时可以安全重试、何时必须先观察、何时应该停住”变成可测试、可导出的 Runtime contract。
+> Witness 是一个 CI 自动修复 Agent Runtime；本 Demo 验证修复与发布中断后的恢复边界，并将执行事实转化为可复核的交付证据。
 
 ## 明确限制：不能过度声称什么
 
